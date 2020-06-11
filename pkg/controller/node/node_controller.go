@@ -265,7 +265,7 @@ func getRrPerZone(nodes *corev1.NodeList) map[string]int {
 	rrPerZone := map[string]int{}
 
 	for _, node := range nodes.Items {
-		if _, ok := rrPerZone[node.GetLabels()[zoneLabel]]; ok == false {
+		if _, ok := rrPerZone[node.GetLabels()[zoneLabel]]; !ok {
 			rrPerZone[node.GetLabels()[zoneLabel]] = 0
 		}
 
@@ -278,10 +278,7 @@ func getRrPerZone(nodes *corev1.NodeList) map[string]int {
 }
 
 func isLabeled(node *corev1.Node) bool {
-	if node.Labels[routeReflectorLabel] == "true" {
-		return true
-	}
-	return false
+	return node.Labels[routeReflectorLabel] == "true"
 }
 
 // When the nodes fails some healthchecks? E.g. reboot
@@ -296,7 +293,7 @@ func isReady(node *corev1.Node) bool {
 
 // Cordoning sets this to true
 func isSchedulable(node *corev1.Node) bool {
-	if node.Spec.Unschedulable == true {
+	if node.Spec.Unschedulable {
 		return false
 	}
 	return true
@@ -325,7 +322,7 @@ func (r *ReconcileNode) enableAllToRrSessions() (bool, error) {
 
 	log.Info("Creating peer-with-route-reflectors BGPPeers Calico object")
 	if bgppeer == nil {
-		bgppeer, err = r.calico.BGPPeers().Create(context.Background(), &apiv3.BGPPeer{
+		_, err = r.calico.BGPPeers().Create(context.Background(), &apiv3.BGPPeer{
 			ObjectMeta: metav1.ObjectMeta{Name: "peer-with-route-reflectors"},
 			Spec: apiv3.BGPPeerSpec{
 				NodeSelector: "all()",
@@ -476,7 +473,8 @@ func (r *ReconcileNode) execOnPod(pod *corev1.Pod, cmd []string) (string, error)
 func (r *ReconcileNode) changeNodeToRr(node *corev1.Node) (bool, error) {
 	if isLabeled(node) {
 		var err error
-		cnode := &apiv3.Node{}
+		var cnode *apiv3.Node
+
 		if cnode, err = r.calico.Nodes().Get(context.Background(), node.Labels[workerIDLabel], options.GetOptions{}); err != nil {
 			log.Error(err, "Failed to get Calico node object")
 			return false, err
@@ -509,11 +507,13 @@ func (r *ReconcileNode) disableFullMesh() (bool, error) {
 	if bgpconfig != nil {
 		log.Info("Updating default Calico BGPConfiguration w/ nodeToNodeMeshEnabled: false")
 		bgpconfig.Spec.NodeToNodeMeshEnabled = &disable
-		r.calico.BGPConfigurations().Update(context.Background(), bgpconfig, options.SetOptions{})
+		if _, err = r.calico.BGPConfigurations().Update(context.Background(), bgpconfig, options.SetOptions{}); err != nil {
+			log.Error(err, "Failed to update default Calico BGPConfiguration w/ nodeToNodeMeshEnabled: false")
+		}
 	} else {
 		log.Info("Creating default Calico BGPConfiguration w/ nodeToNodeMeshEnabled: false")
 		disable := false
-		bgpconfig, err = r.calico.BGPConfigurations().Create(context.Background(), &apiv3.BGPConfiguration{
+		_, err = r.calico.BGPConfigurations().Create(context.Background(), &apiv3.BGPConfiguration{
 			ObjectMeta: metav1.ObjectMeta{Name: "default"},
 			Spec: apiv3.BGPConfigurationSpec{
 				NodeToNodeMeshEnabled: &disable,
