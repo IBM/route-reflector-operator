@@ -34,7 +34,7 @@ slogsf:
 watch:
 	watch -n1 "kubectl get nodes -l route-reflector=true && echo "==========" && calicoctl get bgpconfig -oyaml --config=$C && echo "==========" && calicoctl get bgppeers -oyaml --config=$C"
 
-all: update-operator-resrouces build-operator publish-image copy-secret apply-role deploy-operator slogsf
+all: update-operator-resource build-operator publish-image copy-secret apply-role deploy-operator slogsf
 
 cleanup:
 	kubectl delete -f deploy/service_account.yaml

@@ -166,7 +166,7 @@ type reconcileImplParams struct {
 
 func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcile.Result, error) {
 	//func (r *ReconcileRouteReflector) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	_ = log.WithValues("route-reflector-operator", "migration")
+	_ = log.WithValues("route-reflector-operator", "MigrationWorkflow")
 	log.Info("Reconciling RouteReflector")
 
 	// Fetch the RouteReflector instance(s)
