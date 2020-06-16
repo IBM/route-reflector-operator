@@ -1,0 +1,7 @@
+apiVersion: route-reflector.ibm.com/v1
+kind: RouteReflector
+metadata:
+  name: example-routereflector
+spec:
+  # Add fields here
+  size: 3

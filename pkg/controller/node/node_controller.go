@@ -1,20 +1,12 @@
 package node
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -27,7 +19,6 @@ import (
 
 	apiv3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	clientv3 "github.com/projectcalico/libcalico-go/lib/clientv3"
-	calicoErrors "github.com/projectcalico/libcalico-go/lib/errors"
 	"github.com/projectcalico/libcalico-go/lib/options"
 )
 
@@ -174,66 +165,8 @@ type reconcileImplParams struct {
 }
 
 func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcile.Result, error) {
-	_ = log.WithValues("route-reflector-operator", request.NamespacedName)
+	_ = log.WithValues("route-reflector-operator", "AutoScaler")
 	log.Info("Reconciling Node")
-
-	if yes, err := p.isRrEnabled(); err != nil {
-		log.Error(err, "Failed to isRrEnabled")
-		return reconcile.Result{}, nil
-	} else if !yes {
-		// Execute migration to RR workflow
-
-		log.Info("route-reflector-operator", "====================================================================", "")
-		log.Info("route-reflector-operator", "Calico NodeToNodeMesh is ENABLED, starting migration to RRs workflow", "")
-		log.Info("route-reflector-operator", "====================================================================", "")
-
-		// Fetch nodes for RR selection
-		nodes := &corev1.NodeList{}
-		if err = p.client.List(context.Background(), nodes, &client.ListOptions{}); err != nil {
-			log.Error(err, "Failed to fetch NodeList")
-			return reconcile.Result{}, nil
-		}
-
-		// a calico bgppeers object is created
-		p.enableAllToRrSessions()
-		// Node_ sessions are added to BIRD
-		rrNodes, _ := p.selectRrNodes(nodes)
-
-		// Network disruption on RR nodes as they switch to RR function
-		for _, rrNode := range rrNodes {
-			p.changeNodeToRr(rrNode)
-		}
-
-		// Fetch calico pods to disable Mesh_ sessions
-		calicoPods := &corev1.PodList{}
-		label, _ := labels.Parse("k8s-app=calico-node")
-		err = p.client.List(context.TODO(), calicoPods, &client.ListOptions{
-			LabelSelector: label,
-		})
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-
-		// To avoid a network disruption of 1-2s on the whole overlay network,
-		// the op. disables all of the BIRD Mesh_ sessions to the RRs
-
-		// i.e. kubectl exec birdcl disable Mesh_
-		if _, err := p.disableMeshSessionsToRrs(calicoPods, rrNodes); err != nil {
-			return reconcile.Result{}, err
-		}
-
-		// Wait for sessions to reestablish
-		time.Sleep(6 * time.Second)
-
-		if success, err := p.verifyMeshSessionsDisabled(calicoPods, rrNodes); err != nil || !success {
-			log.Error(err, "Verification of RR sessions failed")
-			return reconcile.Result{}, err
-		}
-
-		// The full-mesh can be safely teared down now.
-		p.disableFullMesh()
-
-	} // End of migration workflow
 
 	// Fetch the Node instance
 	instance := &corev1.Node{}
@@ -254,84 +187,6 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 	}
 
 	return reconcile.Result{}, nil
-}
-
-func (p *reconcileImplParams) isRrEnabled() (bool, error) {
-	enable := true
-	bgpconfig, err := p.calico.BGPConfigurations.Get(context.Background(), "default", options.GetOptions{})
-	if _, ok := err.(calicoErrors.ErrorResourceDoesNotExist); err != nil && !ok {
-		// Failed to get the BGP configuration (and not because it doesn't exist).
-		// Exit.
-		log.Error(err, "Failed to query current BGP settings")
-		return true, nil
-	}
-
-	// Check if NodeToNodeMesh is enabled, if so it's not an RR enabled cluster
-	if bgpconfig != nil && bgpconfig.Spec.NodeToNodeMeshEnabled == &enable {
-		return false, nil
-		// Empty default BGPConfiguration means NodeToNodeMesh is not disable,
-		// migration workflow hasn't been executed yet
-	} else if bgpconfig == nil {
-		return false, nil
-	}
-	return true, nil
-}
-
-func (p *reconcileImplParams) selectRrNodes(nodes *corev1.NodeList) ([]*corev1.Node, error) {
-	var rrNodes []*corev1.Node
-	rrPerZone := getRrPerZone(nodes)
-
-	// FIXME
-	// numberOfRRsPerZone := int((3 + len(nodes.Items)/100) / len(rrPerZone))
-
-	var numberOfRRsPerZone int
-	switch len(rrPerZone) {
-	case 1:
-		numberOfRRsPerZone = 3
-	case 2:
-		numberOfRRsPerZone = 2
-	default:
-		numberOfRRsPerZone = 1
-	}
-
-	for i := range nodes.Items {
-		if isLabeled(&nodes.Items[i]) || !isReady(&nodes.Items[i]) || !isSchedulable(&nodes.Items[i]) || isTainted(&nodes.Items[i]) {
-			continue
-		}
-
-		// Label it if more RRs are needed in the zone
-		if rrPerZone[nodes.Items[i].GetLabels()[zoneLabel]] < numberOfRRsPerZone {
-			log.Info("route-reflector-operator", "Selecting node for RR", nodes.Items[i].GetName())
-			nodes.Items[i].Labels["route-reflector"] = "true"
-
-			// && !errors.IsNotFound(err)
-			if err := p.client.Update(context.Background(), &nodes.Items[i], &client.UpdateOptions{}); err != nil {
-				log.Error(err, "Failed to update node with label")
-				return nil, err
-			}
-
-			rrNodes = append(rrNodes, &nodes.Items[i])
-			rrPerZone[nodes.Items[i].GetLabels()[zoneLabel]]++
-		}
-	}
-
-	return rrNodes, nil
-}
-
-func getRrPerZone(nodes *corev1.NodeList) map[string]int {
-	rrPerZone := map[string]int{}
-
-	for _, node := range nodes.Items {
-		if _, ok := rrPerZone[node.GetLabels()[zoneLabel]]; !ok {
-			rrPerZone[node.GetLabels()[zoneLabel]] = 0
-		}
-
-		if isLabeled(&node) {
-			rrPerZone[node.GetLabels()[zoneLabel]]++
-		}
-	}
-
-	return rrPerZone
 }
 
 func isLabeled(node *corev1.Node) bool {
@@ -364,222 +219,4 @@ func isTainted(node *corev1.Node) bool {
 		}
 	}
 	return false
-}
-
-func (p *reconcileImplParams) enableAllToRrSessions() (bool, error) {
-	var err error
-
-	bgppeer, err := p.calico.BGPPeers.Get(context.Background(), "peer-with-route-reflectors", options.GetOptions{})
-	if _, ok := err.(calicoErrors.ErrorResourceDoesNotExist); err != nil && !ok {
-		// Failed to get the BGP peer (and not because it doesn't exist).
-		// Exit.
-		log.Error(err, "Failed to query current BGP settings")
-		return false, err
-	}
-
-	log.Info("Creating peer-with-route-reflectors BGPPeers Calico object")
-	if bgppeer == nil {
-		_, err = p.calico.BGPPeers.Create(context.Background(), &apiv3.BGPPeer{
-			ObjectMeta: metav1.ObjectMeta{Name: "peer-with-route-reflectors"},
-			Spec: apiv3.BGPPeerSpec{
-				NodeSelector: "all()",
-				PeerSelector: "route-reflector == 'true'",
-			},
-		}, options.SetOptions{})
-
-		if err != nil {
-			log.Error(err, "Failed to create peer-with-route-reflectors BGPPeers")
-		}
-	}
-
-	return true, nil
-}
-
-func (p *reconcileImplParams) disableMeshSessionsToRrs(pods *corev1.PodList, rrNodes []*corev1.Node) (bool, error) {
-
-	var cmds [][]string
-
-	for _, rrNode := range rrNodes {
-		cmds = append(cmds, []string{
-			"birdcl",
-			"-s",
-			"/var/run/calico/bird.ctl",
-			"disable",
-			birdMeshSessionName(rrNode),
-		})
-	}
-
-	log.Info(fmt.Sprintf("Disabling %v Mesh_ sessions on %v Nodes", len(rrNodes), len(pods.Items)))
-	for _, pod := range pods.Items {
-		for _, cmd := range cmds {
-			p.execOnPod(&pod, cmd)
-		} // cmd
-	} // pod
-
-	return true, nil
-}
-
-// Verifies if Mesh_ sessions to the RRs are in a non Established state
-// and Node_ sessions in the Established state
-func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, rrNodes []*corev1.Node) (bool, error) {
-
-	// To check whether the session is Established. 1 for yes, 0 for no
-	cmd := []string{
-		"birdcl",
-		"-s",
-		"/var/run/calico/bird.ctl",
-		"show",
-		"protocols",
-		// index = 5, replace it with Mesh_x || Node_x
-		"",
-	}
-
-	var birdOutput string
-	var err error
-
-	log.Info(fmt.Sprintf("Verifying %v-%v Mesh_ and Node_ sessions on %v Nodes", len(rrNodes), len(rrNodes), len(pods.Items)))
-	for _, pod := range pods.Items {
-		for _, rrNode := range rrNodes {
-			if pod.Spec.NodeName != rrNode.GetName() {
-
-				// Checking the Mesh_ session to not be Established
-				cmd[5] = birdMeshSessionName(rrNode)
-				if birdOutput, err = p.execOnPod(&pod, cmd); err != nil {
-					log.Error(err, fmt.Sprintf("Exec of %s on %s/%s failed", cmd, pod.Spec.NodeName, pod.GetName()))
-					return false, err
-				} else if strings.Count(birdOutput, "Established") != 0 {
-					log.Info(fmt.Sprintf("VERIFY of [Node_][%s] ERROR on %s", rrNode.GetName(), pod.Spec.NodeName))
-					return false, nil
-				}
-
-				// Checking the Node_ session to be Established
-				cmd[5] = birdNodeSessionName(rrNode)
-				if birdOutput, err = p.execOnPod(&pod, cmd); err != nil {
-					log.Error(err, fmt.Sprintf("Exec of %s on %s/%s failed", cmd, pod.Spec.NodeName, pod.GetName()))
-					return false, err
-				} else if strings.Count(birdOutput, "Established") != 1 {
-					log.Info(fmt.Sprintf("VERIFY of [Node_][%s] ERROR on %s", rrNode.GetName(), pod.Spec.NodeName))
-					return false, nil
-				}
-			}
-		}
-	}
-
-	return true, nil
-}
-
-func birdMeshSessionName(node *corev1.Node) string {
-	return "Mesh_" + strings.Replace(node.GetName(), ".", "_", -1)
-}
-
-func birdNodeSessionName(node *corev1.Node) string {
-	return "Node_" + strings.Replace(node.GetName(), ".", "_", -1)
-}
-
-func (p *reconcileImplParams) execOnPod(pod *corev1.Pod, cmd []string) (string, error) {
-	var err error
-
-	var clientset *kubernetes.Clientset
-	if clientset, err = kubernetes.NewForConfig(p.rconfig); err != nil {
-		log.Error(err, "Failed to get *kubernetes.Clientset")
-		return "", err
-	}
-
-	req := clientset.CoreV1().RESTClient().Post().
-		Namespace("kube-system").
-		Resource("pods").
-		Name(pod.GetName()).
-		SubResource("exec")
-
-	podscheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(podscheme); err != nil {
-		log.Error(err, "Failed to AddToscheme")
-		return "", err
-	}
-	parameterCodec := runtime.NewParameterCodec(podscheme)
-	req.VersionedParams(&corev1.PodExecOptions{
-		Command: cmd,
-		Stdout:  true,
-		Stderr:  true,
-		TTY:     false,
-	}, parameterCodec)
-
-	var exec remotecommand.Executor
-	if exec, err = remotecommand.NewSPDYExecutor(p.rconfig, "POST", req.URL()); err != nil {
-		log.Error(err, "Failed to NewSPDYExecutor")
-		return "", err
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = exec.Stream(remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-		Tty:    true,
-	})
-	if err != nil {
-		log.Error(err, "Failed to exec.Stream")
-		return "", err
-	}
-
-	return stdout.String() + stderr.String(), nil
-}
-
-// Add a Cluster ID to Calico node object
-// The BIRD sessions are reestablished with the 'rr client' option
-// This results in a 1.8-2.2s network disruption on the RR node
-func (p *reconcileImplParams) changeNodeToRr(node *corev1.Node) (bool, error) {
-	if isLabeled(node) {
-		var err error
-		var cnode *apiv3.Node
-
-		if cnode, err = p.calico.Nodes.Get(context.Background(), node.Labels[workerIDLabel], options.GetOptions{}); err != nil {
-			log.Error(err, "Failed to get Calico node object")
-			return false, err
-		}
-		cnode.Spec.BGP.RouteReflectorClusterID = clusterID
-		if _, err = p.calico.Nodes.Update(context.Background(), cnode, options.SetOptions{}); err != nil {
-			log.Error(err, "Failed to updatee Calico node object with RouteReflectorClusterID")
-			return false, err
-		}
-		log.Info(fmt.Sprintf("Node %s switched to RR function w/ the Cluster ID of %s", node.GetName(), clusterID))
-		return true, nil
-	}
-	return false, nil
-}
-
-// Creates the default Calico BGPConfiguration with the nodeToNodeMeshEnable: false option
-// or updates the existing one with the same
-func (p *reconcileImplParams) disableFullMesh() (bool, error) {
-	var err error
-
-	bgpconfig, err := p.calico.BGPConfigurations.Get(context.Background(), "default", options.GetOptions{})
-	if _, ok := err.(calicoErrors.ErrorResourceDoesNotExist); err != nil && !ok {
-		// Failed to get the BGP configuration (and not because it doesn't exist).
-		// Exit.
-		log.Error(err, "Failed to query current BGP settings")
-		return false, err
-	}
-
-	disable := false
-	if bgpconfig != nil {
-		log.Info("Updating default Calico BGPConfiguration w/ nodeToNodeMeshEnabled: false")
-		bgpconfig.Spec.NodeToNodeMeshEnabled = &disable
-		if _, err = p.calico.BGPConfigurations.Update(context.Background(), bgpconfig, options.SetOptions{}); err != nil {
-			log.Error(err, "Failed to update default Calico BGPConfiguration w/ nodeToNodeMeshEnabled: false")
-		}
-	} else {
-		log.Info("Creating default Calico BGPConfiguration w/ nodeToNodeMeshEnabled: false")
-		disable := false
-		_, err = p.calico.BGPConfigurations.Create(context.Background(), &apiv3.BGPConfiguration{
-			ObjectMeta: metav1.ObjectMeta{Name: "default"},
-			Spec: apiv3.BGPConfigurationSpec{
-				NodeToNodeMeshEnabled: &disable,
-			},
-		}, options.SetOptions{})
-		if err != nil {
-			log.Error(err, "Failed tp create default BGPConfiguration with 'NodeToNodeMeshEanble: false'")
-		}
-	}
-
-	return true, nil
 }

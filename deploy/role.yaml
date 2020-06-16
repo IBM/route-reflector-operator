@@ -1,6 +1,7 @@
-kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
+  creationTimestamp: null
   name: route-reflector-operator
 rules:
 - apiGroups:
@@ -44,16 +45,16 @@ rules:
   resources:
   - servicemonitors
   verbs:
-  - "get"
-  - "create"
+  - get
+  - create
 - apiGroups:
   - apps
-  resources:
-  - deployments/finalizers
   resourceNames:
   - route-reflector-operator
+  resources:
+  - deployments/finalizers
   verbs:
-  - "update"
+  - update
 - apiGroups:
   - ""
   resources:
@@ -67,3 +68,15 @@ rules:
   - deployments
   verbs:
   - get
+- apiGroups:
+  - route-reflector.ibm.com
+  resources:
+  - '*'
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
