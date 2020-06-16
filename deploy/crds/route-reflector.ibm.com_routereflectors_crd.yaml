@@ -40,6 +40,8 @@ spec:
         status:
           description: RouteReflectorStatus defines the observed state of RouteReflector
           properties:
+            autoScalerConverged:
+              type: boolean
             routeReflectors:
               description: 'INSERT ADDITIONAL STATUS FIELD - define observed state
                 of cluster Important: Run "operator-sdk generate k8s" to regenerate
@@ -49,6 +51,7 @@ spec:
                 type: string
               type: array
           required:
+          - autoScalerConverged
           - routeReflectors
           type: object
       required:
