@@ -2,6 +2,10 @@ GO111MODULE := on
 GOPRIVATE := *.ibm.com
 OSS_FILES := go.mod Dockerfile
 
+update-operator-resource:
+	operator-sdk generate crds
+	operator-sdk generate k8s
+
 build-operator:
 	operator-sdk build $(IMG)
 
@@ -30,7 +34,7 @@ slogsf:
 watch:
 	watch -n1 "kubectl get nodes -l route-reflector=true && echo "==========" && calicoctl get bgpconfig -oyaml --config=$C && echo "==========" && calicoctl get bgppeers -oyaml --config=$C"
 
-all: build-operator publish-image copy-secret apply-role deploy-operator slogsf
+all: update-operator-resrouces build-operator publish-image copy-secret apply-role deploy-operator slogsf
 
 cleanup:
 	kubectl delete -f deploy/service_account.yaml
