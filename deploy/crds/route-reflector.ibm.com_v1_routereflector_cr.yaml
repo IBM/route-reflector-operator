@@ -1,7 +1,11 @@
 apiVersion: route-reflector.ibm.com/v1
 kind: RouteReflector
 metadata:
-  name: example-routereflector
+  name: route-reflector-operator
+  namespace: kube-system
 spec:
-  # Add fields here
-  size: 3
+  preferredPool: ""
+  ignoredPools:
+    - "edge"
+    - "gateway"
+    - "firewall"

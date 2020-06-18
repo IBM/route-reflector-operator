@@ -1,9 +1,12 @@
 package node
 
 import (
+	"context"
 	"os"
 
+	routereflectorv1 "github.com/IBM/route-reflector-operator/pkg/apis/routereflector/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,10 +29,12 @@ import (
 var log = logf.Log.WithName("controller_node")
 
 const (
-	routeReflectorLabel = "route-reflector"
-	zoneLabel           = "failure-domain.beta.kubernetes.io/zone"
-	workerIDLabel       = "ibm-cloud.kubernetes.io/worker-id"
-	clusterID           = "0.0.0.1"
+	routeReflectorLabel           = "route-reflector"
+	zoneLabel                     = "failure-domain.beta.kubernetes.io/zone"
+	workerIDLabel                 = "ibm-cloud.kubernetes.io/worker-id"
+	clusterID                     = "0.0.0.1"
+	routeReflectorConfigNameSpace = "kube-system"
+	routeReflectorConfigName      = "route-reflector-operator"
 )
 
 // Add creates a new Node Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -142,5 +147,44 @@ type ReconcileNode struct {
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
 func (r *ReconcileNode) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	return r.autoscaler.Reconcile(request)
+
+	res, err := r.autoscaler.Reconcile(request)
+	if err != nil {
+		return res, err
+	}
+
+	if res.Requeue {
+		return res, nil
+	}
+
+	// Fetch the RouteReflector instance(s)
+	routereflector := &routereflectorv1.RouteReflector{}
+	err = r.client.Get(context.Background(), client.ObjectKey{
+		Namespace: routeReflectorConfigNameSpace,
+		Name:      routeReflectorConfigName,
+	}, routereflector)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Request object not found, could have been deleted after reconcile request.
+			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
+			// Return and don't requeue
+			return reconcile.Result{}, nil
+		}
+		// Error reading the object - requeue the request.
+		return reconcile.Result{}, err
+	}
+
+	if routereflector.Status.AutoScalerConverged != true {
+
+		log.Info("Setting AutoScalerConverged state to true")
+
+		routereflector.Status.AutoScalerConverged = true
+		if err = r.client.Status().Update(context.Background(), routereflector, &client.UpdateOptions{}); err != nil {
+			log.Error(err, "Failed to update AutoScalerConverged state")
+			return reconcile.Result{}, err
+		}
+	}
+
+	return res, nil
 }
