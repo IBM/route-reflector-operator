@@ -3,5 +3,8 @@ kind: RouteReflector
 metadata:
   name: example-routereflector
 spec:
-  # Add fields here
-  size: 3
+  preferredPool: ""
+  ignoredPools:
+    - "edge"
+    - "gateway"
+    - "firewall"

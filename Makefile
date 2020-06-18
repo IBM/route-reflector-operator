@@ -20,6 +20,7 @@ apply-role:
 	-kubectl apply -f deploy/service_account.yaml
 	-kubectl apply -f deploy/role.yaml
 	-kubectl apply -f deploy/role_binding.yaml
+	-kubectl apply -f deploy/crds/route-reflector.ibm.com_routereflectors_crd.yaml
 
 copy-secret:
 	-kubectl get secret default-us-icr-io -n default -o yaml | sed -e 's/namespace: default/namespace: kube-system/' -e 's/default-us-icr-io/default-us-icr-io/' | kubectl create -f -
@@ -41,7 +42,8 @@ cleanup:
 	kubectl delete -f deploy/role.yaml
 	kubectl delete -f deploy/role_binding.yaml
 	kubectl delete -f deploy/operator.dev.yaml
-	rm -fi deploy/operator.dev.yaml
+	kubectl delete -f deploy/crds/route-reflector.ibm.com_routereflectors_crd.yaml
+	rm -f deploy/operator.dev.yaml
 
 .PHONY: updatedeps
 updatedeps:
