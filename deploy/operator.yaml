@@ -30,6 +30,8 @@ spec:
                   fieldPath: metadata.name
             - name: OPERATOR_NAME
               value: "route-reflector-operator"
+            - name: DATASTORE_TYPE
+              value: "etcdv3"
             - name: ETCD_ENDPOINTS
               valueFrom:
                 configMapKeyRef:
