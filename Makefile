@@ -1,15 +1,16 @@
 GO111MODULE := on
-GOPRIVATE := *.ibm.com
-OSS_FILES := go.mod Dockerfile
 
 update-operator-resource:
 	operator-sdk generate crds
 	operator-sdk generate k8s
 
 build-operator:
+ifndef IMG
+	$(error Missing image, please define IMG)
+endif
 	operator-sdk build $(IMG)
 
-publish-image:
+publish-image: build-operator
 	docker push $(IMG)
 
 deploy-operator:
