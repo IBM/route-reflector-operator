@@ -75,20 +75,23 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 		panic("Datastore not supported " + dsType)
 	}
 
+	incompatibleLabels := map[string]*string{}
+
 	return &ReconcileNode{
 		client:  mgr.GetClient(),
 		calico:  c,
 		rconfig: rc,
 		scheme:  mgr.GetScheme(),
 		autoscaler: controllers.RouteReflectorConfigReconciler{
-			Client:       mgr.GetClient(),
-			CalicoClient: c,
-			Log:          logf.Log.WithName("controller_node"),
-			Scheme:       mgr.GetScheme(),
-			NodeLabelKey: topologyConfig.NodeLabelKey,
-			Topology:     topology,
-			Datastore:    datastore,
-			BGPPeer:      *bgppeer.NewBGPPeer(c),
+			Client:             mgr.GetClient(),
+			CalicoClient:       c,
+			Log:                logf.Log.WithName("controller_node"),
+			Scheme:             mgr.GetScheme(),
+			NodeLabelKey:       topologyConfig.NodeLabelKey,
+			IncompatibleLabels: incompatibleLabels,
+			Topology:           topology,
+			Datastore:          datastore,
+			BGPPeer:            *bgppeer.NewBGPPeer(c),
 		},
 	}
 }
