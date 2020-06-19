@@ -16,7 +16,6 @@ github.com/operator-framework/operator-sdk,v0.16.0
 github.com/projectcalico/libcalico-go,v0.0.0-20200311114621-dc8a242e181d
 github.com/prometheus/procfs,v0.0.11
 github.com/spf13/pflag,v1.0.5
-github.ibm.com/alchemy-containers/armada-opensource-lib,v0.3.4
 go.uber.org/atomic,v1.5.1
 google.golang.org/appengine,v1.6.6
 gopkg.in/yaml.v2,v2.2.8

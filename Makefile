@@ -47,8 +47,3 @@ cleanup:
 updatedeps:
 	go get -u=patch ./...
 	go mod tidy
-	$(MAKE) oss
-
-.PHONY: oss
-oss:
-	go run github.ibm.com/alchemy-containers/armada-opensource-lib/cmd/makeoss ${OSS_FILES}
