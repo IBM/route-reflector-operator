@@ -32,6 +32,11 @@ import (
 
 var log = logf.Log.WithName("controller_routereflector")
 
+const (
+	routeReflectorConfigNameSpace = "kube-system"
+	routeReflectorConfigName      = "route-reflector-operator"
+)
+
 /**
 * USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
 * business logic.  Delete these comments after modifying this file.*
@@ -170,8 +175,12 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 	log.Info("Reconciling RouteReflector")
 
 	// Fetch the RouteReflector instance(s)
-	routereflector := &routereflectorv1.RouteReflectorList{}
-	err := p.client.List(context.Background(), routereflector, &client.ListOptions{})
+	routereflector := &routereflectorv1.RouteReflector{}
+	err := p.client.Get(context.Background(), client.ObjectKey{
+		Namespace: routeReflectorConfigNameSpace,
+		Name:      routeReflectorConfigName,
+	}, routereflector)
+
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -183,43 +192,41 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		return reconcile.Result{}, err
 	}
 
-	if len(routereflector.Items) > 1 {
-		log.Error(err, "More than 1 RouteReflector CR found")
-		return reconcile.Result{}, err
-	}
-
-	var autoScalerConverged, rrDisabled bool
+	var autoScalerConverged, fullMesh bool
 
 	// The autoscaler controller should update the CR Status failed after its first successful reconcile loop
-	if autoScalerConverged, err = p.isAutoScalerConverged(&routereflector.Items[0]); err != nil {
+	if autoScalerConverged, err = p.isAutoScalerConverged(routereflector); err != nil {
 		log.Error(err, "Failed to isAutoScalerConverged")
 		return reconcile.Result{}, nil
 	}
 
-	// If full-mesh is disabled, we assume RR state is enabled
-	if rrDisabled, err = p.isRrEnabled(); err != nil {
+	// If full-mesh is enabled, we assume RR state is not yet enabled
+	if fullMesh, err = p.isFullMeshEnabled(); err != nil {
 		log.Error(err, "Failed to isRrEnabled")
 		return reconcile.Result{}, nil
 	}
 
 	// Execute migration to RRs workflow
-	if autoScalerConverged && rrDisabled {
+	if autoScalerConverged && fullMesh {
 
 		log.Info("route-reflector-operator", "====================================================================", "")
 		log.Info("route-reflector-operator", "RR AutoScaler CONVERGED, Calico NodeToNodeMesh is ENABLED,", "")
 		log.Info("route-reflector-operator", "Starting migration to RRs workflow", "")
 		log.Info("route-reflector-operator", "====================================================================", "")
 
-		// Fetch nodes for RR selection
-		nodes := &corev1.NodeList{}
-		if err = p.client.List(context.Background(), nodes, &client.ListOptions{}); err != nil {
+		// Fetch RR nodes
+		rrNodes := &corev1.NodeList{}
+		label, _ := labels.Parse("calico-route-reflector")
+		if err = p.client.List(context.Background(), rrNodes, &client.ListOptions{
+			LabelSelector: label,
+		}); err != nil {
 			log.Error(err, "Failed to fetch NodeList")
 			return reconcile.Result{}, nil
 		}
 
 		// Fetch calico pods to disable Mesh_ sessions
 		calicoPods := &corev1.PodList{}
-		label, _ := labels.Parse("k8s-app=calico-node")
+		label, _ = labels.Parse("k8s-app=calico-node")
 		err = p.client.List(context.TODO(), calicoPods, &client.ListOptions{
 			LabelSelector: label,
 		})
@@ -230,9 +237,6 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		// To avoid a network disruption of 1-2s on the whole overlay network,
 		// the op. disables all of the BIRD Mesh_ sessions to the RRs
 
-		// FIXME
-		var rrNodes []*corev1.Node
-
 		// i.e. kubectl exec birdcl disable Mesh_
 		if _, err := p.disableMeshSessionsToRrs(calicoPods, rrNodes); err != nil {
 			return reconcile.Result{}, err
@@ -241,9 +245,12 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		// Wait for sessions to reestablish
 		time.Sleep(6 * time.Second)
 
-		if success, err := p.verifyMeshSessionsDisabled(calicoPods, rrNodes); err != nil || !success {
-			log.Error(err, "Verification of RR sessions failed")
+		if success, err := p.verifyMeshSessionsDisabled(calicoPods, rrNodes); err != nil {
+			log.Error(err, "Failed to verify RR sessions")
 			return reconcile.Result{}, err
+		} else if !success {
+			log.Info("Some sessions haven't converged yet, requeueing")
+			return reconcile.Result{Requeue: true}, nil
 		}
 
 		// The full-mesh can be safely teared down now.
@@ -258,7 +265,7 @@ func (p *reconcileImplParams) isAutoScalerConverged(routereflector *routereflect
 	return routereflector.Status.AutoScalerConverged, nil
 }
 
-func (p *reconcileImplParams) isRrEnabled() (bool, error) {
+func (p *reconcileImplParams) isFullMeshEnabled() (bool, error) {
 	enable := true
 	bgpconfig, err := p.calico.BGPConfigurations.Get(context.Background(), "default", options.GetOptions{})
 	if _, ok := err.(calicoErrors.ErrorResourceDoesNotExist); err != nil && !ok {
@@ -270,30 +277,30 @@ func (p *reconcileImplParams) isRrEnabled() (bool, error) {
 
 	// Check if NodeToNodeMesh is enabled, if so it's not an RR enabled cluster
 	if bgpconfig != nil && bgpconfig.Spec.NodeToNodeMeshEnabled == &enable {
-		return false, nil
+		return true, nil
 		// Empty default BGPConfiguration means NodeToNodeMesh is not disable,
 		// migration workflow hasn't been executed yet
 	} else if bgpconfig == nil {
-		return false, nil
+		return true, nil
 	}
-	return true, nil
+	return false, nil
 }
 
-func (p *reconcileImplParams) disableMeshSessionsToRrs(pods *corev1.PodList, rrNodes []*corev1.Node) (bool, error) {
+func (p *reconcileImplParams) disableMeshSessionsToRrs(pods *corev1.PodList, rrNodes *corev1.NodeList) (bool, error) {
 
 	var cmds [][]string
 
-	for _, rrNode := range rrNodes {
+	for _, rrNode := range rrNodes.Items {
 		cmds = append(cmds, []string{
 			"birdcl",
 			"-s",
 			"/var/run/calico/bird.ctl",
 			"disable",
-			birdMeshSessionName(rrNode),
+			birdMeshSessionName(&rrNode),
 		})
 	}
 
-	log.Info(fmt.Sprintf("Disabling %v Mesh_ sessions on %v Nodes", len(rrNodes), len(pods.Items)))
+	log.Info(fmt.Sprintf("Disabling %v Mesh_ sessions on %v Nodes", len(rrNodes.Items), len(pods.Items)))
 	for _, pod := range pods.Items {
 		for _, cmd := range cmds {
 			p.execOnPod(&pod, cmd)
@@ -305,7 +312,7 @@ func (p *reconcileImplParams) disableMeshSessionsToRrs(pods *corev1.PodList, rrN
 
 // Verifies if Mesh_ sessions to the RRs are in a non Established state
 // and Node_ sessions in the Established state
-func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, rrNodes []*corev1.Node) (bool, error) {
+func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, rrNodes *corev1.NodeList) (bool, error) {
 
 	// To check whether the session is Established. 1 for yes, 0 for no
 	cmd := []string{
@@ -321,13 +328,13 @@ func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, r
 	var birdOutput string
 	var err error
 
-	log.Info(fmt.Sprintf("Verifying %v-%v Mesh_ and Node_ sessions on %v Nodes", len(rrNodes), len(rrNodes), len(pods.Items)))
+	log.Info(fmt.Sprintf("Verifying %v-%v Mesh_ and Node_ sessions on %v Nodes", len(rrNodes.Items), len(rrNodes.Items), len(pods.Items)))
 	for _, pod := range pods.Items {
-		for _, rrNode := range rrNodes {
+		for _, rrNode := range rrNodes.Items {
 			if pod.Spec.NodeName != rrNode.GetName() {
 
 				// Checking the Mesh_ session to not be Established
-				cmd[5] = birdMeshSessionName(rrNode)
+				cmd[5] = birdMeshSessionName(&rrNode)
 				if birdOutput, err = p.execOnPod(&pod, cmd); err != nil {
 					log.Error(err, fmt.Sprintf("Exec of %s on %s/%s failed", cmd, pod.Spec.NodeName, pod.GetName()))
 					return false, err
@@ -337,7 +344,7 @@ func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, r
 				}
 
 				// Checking the Node_ session to be Established
-				cmd[5] = birdNodeSessionName(rrNode)
+				cmd[5] = birdNodeSessionName(&rrNode)
 				if birdOutput, err = p.execOnPod(&pod, cmd); err != nil {
 					log.Error(err, fmt.Sprintf("Exec of %s on %s/%s failed", cmd, pod.Spec.NodeName, pod.GetName()))
 					return false, err

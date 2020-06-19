@@ -12,6 +12,8 @@ type RouteReflectorSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
+	PreferredPool string   `json:"preferredPool,omitempty"`
+	IgnoredPools  []string `json:"ignoredPools,omitempty"`
 }
 
 // RouteReflectorStatus defines the observed state of RouteReflector
@@ -19,8 +21,7 @@ type RouteReflectorStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
-	RouteReflectorIPs   []string `json:"routeReflectors"`
-	AutoScalerConverged bool     `json:"autoScalerConverged"`
+	AutoScalerConverged bool `json:"autoScalerConverged"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -34,9 +35,6 @@ type RouteReflector struct {
 
 	Spec   RouteReflectorSpec   `json:"spec,omitempty"`
 	Status RouteReflectorStatus `json:"status,omitempty"`
-
-	PreferredPool string   `json:"preferredPool"`
-	IgnoredPools  []string `json:"ignoredPools"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
