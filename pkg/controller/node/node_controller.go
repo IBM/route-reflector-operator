@@ -37,6 +37,10 @@ const (
 	routeReflectorConfigName      = "route-reflector-operator"
 )
 
+type s struct {
+	s string
+}
+
 // Add creates a new Node Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
@@ -80,7 +84,9 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 		panic("Datastore not supported " + dsType)
 	}
 
-	incompatibleLabels := map[string]*string{}
+	incompatibleLabels := map[string]*string{
+		"dedicated": &(&s{s: "gateway"}).s,
+	}
 
 	return &ReconcileNode{
 		client:  mgr.GetClient(),
