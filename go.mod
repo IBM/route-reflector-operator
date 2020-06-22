@@ -9,6 +9,7 @@ require (
 	github.com/coreos/etcd v3.3.22+incompatible // indirect
 	github.com/coreos/prometheus-operator v0.34.1 // indirect
 	github.com/emicklei/go-restful v2.11.2+incompatible // indirect
+	github.com/go-logr/logr v0.1.0
 	github.com/go-openapi/spec v0.19.8 // indirect
 	github.com/go-openapi/swag v0.19.9 // indirect
 	github.com/golang/protobuf v1.3.5 // indirect
@@ -20,6 +21,7 @@ require (
 	github.com/mhmxs/calico-route-reflector-operator v0.0.5
 	github.com/operator-framework/operator-sdk v0.16.0
 	github.com/projectcalico/libcalico-go v1.7.2-0.20200427180741-f197f7370140
+	github.com/prometheus/common v0.7.0
 	github.com/prometheus/procfs v0.0.11 // indirect
 	github.com/spf13/pflag v1.0.5
 	go.uber.org/atomic v1.5.1 // indirect
