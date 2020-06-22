@@ -2,7 +2,9 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"time"
 
 	routereflectorv1 "github.com/IBM/route-reflector-operator/pkg/apis/routereflector/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -78,8 +80,8 @@ var (
 	nodeUpdateError       = ctrl.Result{}
 	rrListError           = ctrl.Result{}
 	rrPeerListError       = ctrl.Result{}
-	bgpPeerError          = ctrl.Result{}
-	bgpPeerRemoveError    = ctrl.Result{}
+	bgpPeerError          = ctrl.Result{Requeue: true}
+	bgpPeerRemoveError    = ctrl.Result{Requeue: true}
 )
 
 // RouteReflectorConfigReconciler reconciles a RouteReflectorConfig object
@@ -310,11 +312,15 @@ func (r *RouteReflectorConfigReconciler) Reconcile(req ctrl.Request) (ctrl.Resul
 	currentBGPPeers := r.Topology.GenerateBGPPeers(rrList.Items, nodes, existingBGPPeers)
 	log.Debugf("Current BGPeers are: %v", currentBGPPeers)
 
-	for _, bp := range currentBGPPeers {
-		if err := r.BGPPeer.SaveBGPPeer(&bp); err != nil {
-			log.Errorf("Unable to save BGPPeer because of %s", err.Error())
-			return bgpPeerError, err
+	err = retry(20, 2*time.Second, func() (err error) {
+		for _, bp := range currentBGPPeers {
+			err = r.BGPPeer.SaveBGPPeer(&bp)
 		}
+		return
+	})
+	if err != nil {
+		log.Errorf("Unable to save BGPPeer because of %s", err.Error())
+		return bgpPeerError, nil
 	}
 
 	for _, p := range existingBGPPeers.Items {
@@ -322,12 +328,60 @@ func (r *RouteReflectorConfigReconciler) Reconcile(req ctrl.Request) (ctrl.Resul
 			log.Debugf("Removing BGPPeer: %s", p.GetName())
 			if err := r.BGPPeer.RemoveBGPPeer(&p); err != nil {
 				log.Errorf("Unable to remove BGPPeer because of %s", err.Error())
-				return bgpPeerRemoveError, err
+				return bgpPeerRemoveError, nil
 			}
 		}
 	}
 
+	// Fetch the RouteReflector instance(s)
+	routereflector := &routereflectorv1.RouteReflector{}
+	err = r.Client.Get(context.Background(), client.ObjectKey{
+		Namespace: routeReflectorConfigNameSpace,
+		Name:      routeReflectorConfigName,
+	}, routereflector)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Request object not found, could have been deleted after reconcile request.
+			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
+			// Return and don't requeue
+			return reconcile.Result{}, nil
+		}
+		// Error reading the object - requeue the request.
+		return reconcile.Result{}, err
+	}
+
+	if routereflector.Status.AutoScalerConverged != true {
+
+		log.Info("Setting AutoScalerConverged state to true")
+
+		routereflector.Status.AutoScalerConverged = true
+		if err = r.Client.Status().Update(context.Background(), routereflector, &client.UpdateOptions{}); err != nil {
+			log.Error(err, "Failed to update AutoScalerConverged state")
+			return reconcile.Result{}, err
+		}
+	}
+
+	log.Infof("FINISHED!!!!")
 	return finished, nil
+}
+
+func retry(attempts int, sleep time.Duration, f func() error) (err error) {
+	for i := 0; ; i++ {
+		err = f()
+		if err == nil {
+			return
+		}
+
+		if i >= (attempts - 1) {
+			break
+		}
+
+		time.Sleep(sleep)
+
+		log.Errorf("retrying after error:", err.Error())
+	}
+	return fmt.Errorf("after %d attempts, last error: %s", attempts, err)
 }
 
 func (r *RouteReflectorConfigReconciler) removeRRStatus(req ctrl.Request, node *corev1.Node) error {
