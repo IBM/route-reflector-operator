@@ -28,11 +28,13 @@ import (
 	"github.com/IBM/route-reflector-operator/topologies"
 
 	clientv3 "github.com/projectcalico/libcalico-go/lib/clientv3"
+	"github.com/projectcalico/libcalico-go/lib/options"
 
 	"github.com/go-logr/logr"
 	"github.com/mhmxs/calico-route-reflector-operator/controllers"
 	calicoApi "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	calicoClient "github.com/projectcalico/libcalico-go/lib/clientv3"
+	calicoErrors "github.com/projectcalico/libcalico-go/lib/errors"
 	"github.com/prometheus/common/log"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -312,14 +314,35 @@ func (r *RouteReflectorConfigReconciler) Reconcile(req ctrl.Request) (ctrl.Resul
 	currentBGPPeers := r.Topology.GenerateBGPPeers(rrList.Items, nodes, existingBGPPeers)
 	log.Debugf("Current BGPeers are: %v", currentBGPPeers)
 
-	err = retry(20, 2*time.Second, func() (err error) {
+	err = retry(5, 2*time.Second, func() (err error) {
+
 		for _, bp := range currentBGPPeers {
-			err = r.BGPPeer.SaveBGPPeer(&bp)
+			var updateBGPPeer *calicoApi.BGPPeer
+
+			if updateBGPPeer, err = r.CalicoClient.BGPPeers().Get(context.Background(), bp.Name, options.GetOptions{}); err != nil {
+				if _, exists := err.(calicoErrors.ErrorResourceDoesNotExist); !exists {
+					log.Errorf("Unable to fetch update BGPPeer: %s", err.Error())
+				} else {
+					err = nil
+					if err = r.BGPPeer.SaveBGPPeer(&bp); err != nil {
+						log.Errorf("Unable to save new BGPPeer: %s", err.Error())
+					}
+				}
+			} else {
+				updateBGPPeer.Spec.NodeSelector = bp.Spec.NodeSelector
+				updateBGPPeer.Spec.PeerSelector = bp.Spec.PeerSelector
+				err = nil
+				if err = r.BGPPeer.SaveBGPPeer(updateBGPPeer); err != nil {
+					log.Errorf("Unable to save updated BGPPeer: %s", err.Error())
+				}
+			}
 		}
 		return
+
 	})
+
 	if err != nil {
-		log.Errorf("Unable to save BGPPeer because of %s", err.Error())
+		log.Errorf("Unable to refresh BGPPeers: %s", err.Error())
 		return bgpPeerError, nil
 	}
 
