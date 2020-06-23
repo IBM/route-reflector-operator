@@ -29,10 +29,9 @@ import (
 var log = logf.Log.WithName("controller_node")
 
 const (
-	routeReflectorLabel           = "route-reflector"
+	routeReflectorLabel           = "route-reflector.ibm.com/rr-id"
 	zoneLabel                     = "failure-domain.beta.kubernetes.io/zone"
 	workerIDLabel                 = "ibm-cloud.kubernetes.io/worker-id"
-	clusterID                     = "0.0.0.1"
 	routeReflectorConfigNameSpace = "kube-system"
 	routeReflectorConfigName      = "route-reflector-operator"
 )
@@ -64,8 +63,8 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 	}
 
 	topologyConfig := topologies.Config{
-		NodeLabelKey: "calico-route-reflector",
-		ZoneLabel:    "topology.kubernetes.io/zone",
+		NodeLabelKey: routeReflectorLabel,
+		ZoneLabel:    zoneLabel,
 		ClusterID:    "224.0.0.0",
 		Min:          3,
 		Max:          20,
