@@ -69,6 +69,7 @@ func (t *MultiTopology) GenerateBGPPeers(routeReflectors []corev1.Node, nodes ma
 	bgpPeerConfigs := []calicoApi.BGPPeer{}
 
 	rrConfig := findBGPPeer(existingPeers.Items, DefaultRouteReflectorMeshName)
+	selector := fmt.Sprintf("has(%s)", t.NodeLabelKey)
 	if rrConfig == nil {
 		rrConfig = &calicoApi.BGPPeer{
 			TypeMeta: metav1.TypeMeta{
@@ -80,13 +81,15 @@ func (t *MultiTopology) GenerateBGPPeers(routeReflectors []corev1.Node, nodes ma
 			},
 		}
 	}
-	selector := fmt.Sprintf("has(%s)", t.NodeLabelKey)
-	rrConfig.Spec = calicoApi.BGPPeerSpec{
-		NodeSelector: selector,
-		PeerSelector: selector,
-	}
 
-	bgpPeerConfigs = append(bgpPeerConfigs, *rrConfig)
+	if rrConfig.Spec.NodeSelector != selector || rrConfig.Spec.PeerSelector != selector {
+		rrConfig.Spec = calicoApi.BGPPeerSpec{
+			NodeSelector: selector,
+			PeerSelector: selector,
+		}
+
+		bgpPeerConfigs = append(bgpPeerConfigs, *rrConfig)
+	}
 
 	peers := int(math.Min(float64(len(routeReflectors)), 3))
 
@@ -147,7 +150,15 @@ func (t *MultiTopology) GenerateBGPPeers(routeReflectors []corev1.Node, nodes ma
 			rrID := getRouteReflectorID(string(rr.GetUID()))
 			name := fmt.Sprintf(DefaultRouteReflectorClientName+"-%s", rrID, n.GetUID())
 
+			newNodeSelector := fmt.Sprintf("kubernetes.io/hostname=='%s'", n.GetLabels()["kubernetes.io/hostname"])
+			newPeerSelector := fmt.Sprintf("%s=='%d'", t.NodeLabelKey, rrID)
+
 			clientConfig := findBGPPeer(existingPeers.Items, name)
+
+			if clientConfig != nil && clientConfig.Spec.NodeSelector == newNodeSelector && clientConfig.Spec.PeerSelector == newPeerSelector {
+				continue
+			}
+
 			if clientConfig == nil {
 				clientConfig = &calicoApi.BGPPeer{
 					TypeMeta: metav1.TypeMeta{
@@ -159,10 +170,11 @@ func (t *MultiTopology) GenerateBGPPeers(routeReflectors []corev1.Node, nodes ma
 					},
 				}
 			}
+
 			clientConfig.Spec = calicoApi.BGPPeerSpec{
 				// TODO make configurable
-				NodeSelector: fmt.Sprintf("kubernetes.io/hostname=='%s'", n.GetLabels()["kubernetes.io/hostname"]),
-				PeerSelector: fmt.Sprintf("%s=='%d'", t.NodeLabelKey, rrID),
+				NodeSelector: newNodeSelector,
+				PeerSelector: newPeerSelector,
 			}
 
 			bgpPeerConfigs = append(bgpPeerConfigs, *clientConfig)

@@ -328,15 +328,15 @@ func (r *RouteReflectorConfigReconciler) Reconcile(req ctrl.Request) (ctrl.Resul
 		return bgpPeerError, nil
 	}
 
-	for _, p := range existingBGPPeers.Items {
-		if !findBGPPeer(currentBGPPeers, p.GetName()) {
-			log.Debugf("Removing BGPPeer: %s", p.GetName())
-			if err := r.BGPPeer.RemoveBGPPeer(&p); err != nil {
-				log.Errorf("Unable to remove BGPPeer because of %s", err.Error())
-				return bgpPeerRemoveError, nil
-			}
-		}
-	}
+	// for _, p := range existingBGPPeers.Items {
+	// 	if !findBGPPeer(currentBGPPeers, p.GetName()) {
+	// 		log.Debugf("Removing BGPPeer: %s", p.GetName())
+	// 		if err := r.BGPPeer.RemoveBGPPeer(&p); err != nil {
+	// 			log.Errorf("Unable to remove BGPPeer because of %s", err.Error())
+	// 			return bgpPeerRemoveError, nil
+	// 		}
+	// 	}
+	// }
 
 	// Fetch the RouteReflector instance(s)
 	routereflector := &routereflectorv1.RouteReflector{}
