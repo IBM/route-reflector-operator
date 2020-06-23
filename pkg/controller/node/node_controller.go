@@ -11,13 +11,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/rest"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-
-	//logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -30,13 +29,13 @@ import (
 	clientv3 "github.com/projectcalico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/libcalico-go/lib/options"
 
-	"github.com/go-logr/logr"
-	"github.com/mhmxs/calico-route-reflector-operator/controllers"
 	calicoApi "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	calicoClient "github.com/projectcalico/libcalico-go/lib/clientv3"
 	calicoErrors "github.com/projectcalico/libcalico-go/lib/errors"
+
+	//logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"github.com/go-logr/logr"
 	"github.com/prometheus/common/log"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
@@ -86,19 +85,6 @@ var (
 	bgpPeerRemoveError    = ctrl.Result{Requeue: true}
 )
 
-// RouteReflectorConfigReconciler reconciles a RouteReflectorConfig object
-type RouteReflectorConfigReconciler struct {
-	client.Client
-	CalicoClient       calicoClient.Interface
-	Log                logr.Logger
-	Scheme             *runtime.Scheme
-	NodeLabelKey       string
-	IncompatibleLabels map[string]*string
-	Topology           topologies.Topology
-	Datastore          datastores.Datastore
-	BGPPeer            bgppeer.BGPPeer
-}
-
 // Add creates a new Node Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
@@ -114,12 +100,6 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 	if c, err = clientv3.NewFromEnv(); err != nil {
 		return nil
 	}
-
-	// for pods/exec
-	// if rc, err = rest.InClusterConfig(); err != nil {
-	// 	log.Error(err, "Failed to get *rest.Config")
-	// 	return nil
-	// }
 
 	topologyConfig := topologies.Config{
 		NodeLabelKey: "calico-route-reflector",
@@ -190,15 +170,17 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 // blank assignment to verify that ReconcileNode implements reconcile.Reconciler
 var _ reconcile.Reconciler = &RouteReflectorConfigReconciler{}
 
-// ReconcileNode reconciles a Node object
-type ReconcileNode struct {
-	// This client, initialized using mgr.Client() above, is a split client
-	// that reads objects from the cache and writes to the apiserver
-	client     client.Client
-	calico     clientv3.Interface
-	rconfig    *rest.Config
-	scheme     *runtime.Scheme
-	autoscaler controllers.RouteReflectorConfigReconciler
+// RouteReflectorConfigReconciler reconciles a RouteReflectorConfig object
+type RouteReflectorConfigReconciler struct {
+	client.Client
+	CalicoClient       calicoClient.Interface
+	Log                logr.Logger
+	Scheme             *runtime.Scheme
+	NodeLabelKey       string
+	IncompatibleLabels map[string]*string
+	Topology           topologies.Topology
+	Datastore          datastores.Datastore
+	BGPPeer            bgppeer.BGPPeer
 }
 
 // Reconcile reads that state of the cluster for a Node object and makes changes based on the state read
@@ -510,52 +492,4 @@ func findBGPPeer(peers []calicoApi.BGPPeer, name string) bool {
 	}
 
 	return false
-}
-
-//
-//
-//
-//
-
-func (r *ReconcileNode) reconcileOLD(request reconcile.Request) (reconcile.Result, error) {
-
-	res, err := r.autoscaler.Reconcile(request)
-	if err != nil {
-		return res, err
-	}
-
-	if res.Requeue {
-		return res, nil
-	}
-
-	// Fetch the RouteReflector instance(s)
-	routereflector := &routereflectorv1.RouteReflector{}
-	err = r.client.Get(context.Background(), client.ObjectKey{
-		Namespace: routeReflectorConfigNameSpace,
-		Name:      routeReflectorConfigName,
-	}, routereflector)
-
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
-			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
-			// Return and don't requeue
-			return reconcile.Result{}, nil
-		}
-		// Error reading the object - requeue the request.
-		return reconcile.Result{}, err
-	}
-
-	if routereflector.Status.AutoScalerConverged != true {
-
-		log.Info("Setting AutoScalerConverged state to true")
-
-		routereflector.Status.AutoScalerConverged = true
-		if err = r.client.Status().Update(context.Background(), routereflector, &client.UpdateOptions{}); err != nil {
-			log.Error(err, "Failed to update AutoScalerConverged state")
-			return reconcile.Result{}, err
-		}
-	}
-
-	return res, nil
 }
