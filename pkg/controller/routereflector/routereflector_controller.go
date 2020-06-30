@@ -28,11 +28,17 @@ import (
 	clientv3 "github.com/projectcalico/libcalico-go/lib/clientv3"
 	calicoErrors "github.com/projectcalico/libcalico-go/lib/errors"
 	"github.com/projectcalico/libcalico-go/lib/options"
+
+	"github.com/mhmxs/calico-route-reflector-operator/bgppeer"
+	"github.com/mhmxs/calico-route-reflector-operator/topologies"
 )
 
 var log = logf.Log.WithName("controller_routereflector")
 
 const (
+	routeReflectorLabel           = "route-reflector.ibm.com/rr-id"
+	zoneLabel                     = "failure-domain.beta.kubernetes.io/zone"
+	workerIDLabel                 = "ibm-cloud.kubernetes.io/worker-id"
 	routeReflectorConfigNameSpace = "kube-system"
 	routeReflectorConfigName      = "route-reflector-operator"
 )
@@ -63,7 +69,20 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 		log.Error(err, "Failed to get *rest.Config")
 		return nil
 	}
-	return &ReconcileRouteReflector{client: mgr.GetClient(), calico: c, rconfig: rc, scheme: mgr.GetScheme()}
+
+	// for RRs per Node
+	topologyConfig := topologies.Config{
+		NodeLabelKey: routeReflectorLabel,
+		ZoneLabel:    zoneLabel,
+		ClusterID:    "224.0.0.0",
+		Min:          3,
+		Max:          20,
+		Ration:       0.05,
+	}
+	topology := topologies.NewMultiTopology(topologyConfig)
+	bgppeer := *bgppeer.NewBGPPeer(c)
+
+	return &ReconcileRouteReflector{client: mgr.GetClient(), calico: c, rconfig: rc, scheme: mgr.GetScheme(), topology: topology, bgppeer: bgppeer}
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -100,10 +119,12 @@ var _ reconcile.Reconciler = &ReconcileRouteReflector{}
 type ReconcileRouteReflector struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver
-	client  client.Client
-	calico  clientv3.Interface
-	rconfig *rest.Config
-	scheme  *runtime.Scheme
+	client   client.Client
+	calico   clientv3.Interface
+	rconfig  *rest.Config
+	scheme   *runtime.Scheme
+	topology topologies.Topology
+	bgppeer  bgppeer.BGPPeer
 }
 
 // Reconcile reads that state of the cluster for a RouteReflector object and makes changes based on the state read
@@ -123,8 +144,10 @@ func (r *ReconcileRouteReflector) Reconcile(request reconcile.Request) (reconcil
 			Nodes:             r.calico.Nodes(),
 		},
 
-		rconfig: r.rconfig,
-		scheme:  r.scheme,
+		rconfig:  r.rconfig,
+		scheme:   r.scheme,
+		topology: r.topology,
+		bgppeer:  r.bgppeer,
 	}
 	result, err := p.reconcileImpl(request)
 	return result, err
@@ -163,10 +186,12 @@ type reconcileImplCalicoNodes interface {
 type reconcileImplParams struct {
 	request reconcile.Request
 
-	client  reconcileImplKubernetesClient
-	calico  reconcileCalicoParams
-	rconfig *rest.Config
-	scheme  *runtime.Scheme
+	client   reconcileImplKubernetesClient
+	calico   reconcileCalicoParams
+	rconfig  *rest.Config
+	scheme   *runtime.Scheme
+	topology topologies.Topology
+	bgppeer  bgppeer.BGPPeer
 }
 
 func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcile.Result, error) {
