@@ -310,6 +310,46 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 	return reconcile.Result{}, nil
 }
 
+// GetRRsofNode returns Node object pointers of the RRs of a Node
+// BGPPeers are used to resolve the node<>rr mapping
+// Return is nil if node doesn't have active RRs
+func GetRRsofNode(nodes map[*corev1.Node]bool, existingPeers *apiv3.BGPPeerList, node *corev1.Node) (rrs map[*corev1.Node]bool) {
+	rrIDs := map[string]bool{}
+
+	for _, bp := range existingPeers.Items {
+
+		// Skip rrs-to-rrs which has "has()" NodeSlector
+		if strings.Contains(bp.Name, "rrs-to-rrs") {
+			log.Info("Skipping %s", bp.Name)
+			continue
+		}
+
+		// Get rr-id from PeerSelector in BGPeers where the NodeSelector matches the node
+		if keyFieldOfSelector(bp.Spec.NodeSelector) == node.Name {
+			peerSelector := keyFieldOfSelector(bp.Spec.PeerSelector)
+			log.Info("Found rr-id:%s in BGPPeers:%s as existing RR of Node:%s", peerSelector, bp.Name, node.Name)
+			rrIDs[peerSelector] = true
+		}
+	}
+
+	// Find RR Node pointers by checking their rr-id in the rrIDs map
+	for n := range nodes {
+		if _, ok := rrIDs[n.GetLabels()[routeReflectorLabel]]; ok {
+			log.Info("Found %s as existing RR of Node:%s", n.Name, node.Name)
+			if rrs == nil {
+				rrs = map[*corev1.Node]bool{}
+			}
+			rrs[n] = true
+		}
+	}
+
+	return
+}
+
+func keyFieldOfSelector(s string) (key string) {
+	return strings.ReplaceAll(strings.Split(s, "==")[1], "'", "")
+}
+
 func (p *reconcileImplParams) createNodeNameToRRsMapping(nodes map[*corev1.Node]bool) (map[string]map[*corev1.Node]bool, error) {
 	var err error
 
@@ -325,7 +365,7 @@ func (p *reconcileImplParams) createNodeNameToRRsMapping(nodes map[*corev1.Node]
 	// Used for constructing birdcl commands
 	rrNodes := map[string]map[*corev1.Node]bool{}
 	for n := range nodes {
-		if rrs := p.topology.GetRRsofNode(nodes, existingBGPPeers, n); rrs != nil {
+		if rrs := GetRRsofNode(nodes, existingBGPPeers, n); rrs != nil {
 			rrNodes[n.Name] = rrs
 		}
 	}
