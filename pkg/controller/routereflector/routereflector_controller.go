@@ -28,11 +28,17 @@ import (
 	clientv3 "github.com/projectcalico/libcalico-go/lib/clientv3"
 	calicoErrors "github.com/projectcalico/libcalico-go/lib/errors"
 	"github.com/projectcalico/libcalico-go/lib/options"
+
+	"github.com/mhmxs/calico-route-reflector-operator/bgppeer"
+	"github.com/mhmxs/calico-route-reflector-operator/topologies"
 )
 
 var log = logf.Log.WithName("controller_routereflector")
 
 const (
+	routeReflectorLabel           = "route-reflector.ibm.com/rr-id"
+	zoneLabel                     = "failure-domain.beta.kubernetes.io/zone"
+	workerIDLabel                 = "ibm-cloud.kubernetes.io/worker-id"
 	routeReflectorConfigNameSpace = "kube-system"
 	routeReflectorConfigName      = "route-reflector-operator"
 )
@@ -63,7 +69,20 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 		log.Error(err, "Failed to get *rest.Config")
 		return nil
 	}
-	return &ReconcileRouteReflector{client: mgr.GetClient(), calico: c, rconfig: rc, scheme: mgr.GetScheme()}
+
+	// for RRs per Node
+	topologyConfig := topologies.Config{
+		NodeLabelKey: routeReflectorLabel,
+		ZoneLabel:    zoneLabel,
+		ClusterID:    "224.0.0.0",
+		Min:          3,
+		Max:          20,
+		Ration:       0.05,
+	}
+	topology := topologies.NewMultiTopology(topologyConfig)
+	bgppeer := *bgppeer.NewBGPPeer(c)
+
+	return &ReconcileRouteReflector{client: mgr.GetClient(), calico: c, rconfig: rc, scheme: mgr.GetScheme(), topology: topology, bgppeer: bgppeer}
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -100,10 +119,12 @@ var _ reconcile.Reconciler = &ReconcileRouteReflector{}
 type ReconcileRouteReflector struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver
-	client  client.Client
-	calico  clientv3.Interface
-	rconfig *rest.Config
-	scheme  *runtime.Scheme
+	client   client.Client
+	calico   clientv3.Interface
+	rconfig  *rest.Config
+	scheme   *runtime.Scheme
+	topology topologies.Topology
+	bgppeer  bgppeer.BGPPeer
 }
 
 // Reconcile reads that state of the cluster for a RouteReflector object and makes changes based on the state read
@@ -123,8 +144,10 @@ func (r *ReconcileRouteReflector) Reconcile(request reconcile.Request) (reconcil
 			Nodes:             r.calico.Nodes(),
 		},
 
-		rconfig: r.rconfig,
-		scheme:  r.scheme,
+		rconfig:  r.rconfig,
+		scheme:   r.scheme,
+		topology: r.topology,
+		bgppeer:  r.bgppeer,
 	}
 	result, err := p.reconcileImpl(request)
 	return result, err
@@ -163,10 +186,12 @@ type reconcileImplCalicoNodes interface {
 type reconcileImplParams struct {
 	request reconcile.Request
 
-	client  reconcileImplKubernetesClient
-	calico  reconcileCalicoParams
-	rconfig *rest.Config
-	scheme  *runtime.Scheme
+	client   reconcileImplKubernetesClient
+	calico   reconcileCalicoParams
+	rconfig  *rest.Config
+	scheme   *runtime.Scheme
+	topology topologies.Topology
+	bgppeer  bgppeer.BGPPeer
 }
 
 func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcile.Result, error) {
@@ -214,38 +239,62 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		log.Info("route-reflector-operator", "Starting migration to RRs workflow", "")
 		log.Info("route-reflector-operator", "====================================================================", "")
 
-		// Fetch RR nodes
-		rrNodes := &corev1.NodeList{}
-		label, _ := labels.Parse("calico-route-reflector")
-		if err = p.client.List(context.Background(), rrNodes, &client.ListOptions{
-			LabelSelector: label,
-		}); err != nil {
+		// Fetch NodeList for GetRRsofNode() and createNodeNameToRRsMapping() maps
+		nodeList := &corev1.NodeList{}
+		if err = p.client.List(context.Background(), nodeList, &client.ListOptions{}); err != nil {
 			log.Error(err, "Failed to fetch NodeList")
-			return reconcile.Result{}, nil
+			return reconcile.Result{}, err
+		}
+		// FIXME: use . to generate nodes
+		// func (r *RouteReflectorConfigReconciler) collectNodeInfo(allNodes []corev1.Node) (readyNodes int, actualReadyNumber int, filtered map[*corev1.Node]bool)
+		//
+		// Create map for GetRRsofNode() and createNodeNameToRRsMapping()
+		nodes := map[*corev1.Node]bool{}
+		for i := range nodeList.Items {
+			nodes[&nodeList.Items[i]] = true
 		}
 
-		// Fetch calico pods to disable Mesh_ sessions
-		calicoPods := &corev1.PodList{}
-		label, _ = labels.Parse("k8s-app=calico-node")
-		err = p.client.List(context.TODO(), calicoPods, &client.ListOptions{
-			LabelSelector: label,
-		})
-		if err != nil {
+		// Generate NodeName to RR pointers mappings (nodesToRRs, a map of maps)
+		var nodesToRRs map[string]map[*corev1.Node]bool
+		if nodesToRRs, err = p.createNodeNameToRRsMapping(nodes); err != nil {
 			return reconcile.Result{}, err
 		}
 
-		// To avoid a network disruption of 1-2s on the whole overlay network,
+		// Fetch RR nodes for extra verifiction,
+		// to check if all non-rr nodes have at least 1 RR session
+		rrs := &corev1.NodeList{}
+		label, _ := labels.Parse(routeReflectorLabel)
+		if err = p.client.List(context.Background(), rrs, &client.ListOptions{
+			LabelSelector: label,
+		}); err != nil {
+			log.Error(err, "Failed to fetch RR NodeList")
+			return reconcile.Result{}, err
+		}
+
+		log.Info(fmt.Sprintf("len(rrNodes)=%v len(nodes)=%v len(rrs.Items)=%v", len(nodesToRRs), len(nodes), len(rrs.Items)))
+		if len(nodesToRRs) < (len(nodes) - len(rrs.Items)) {
+			log.Error(err, "Some non-rr Nodes doesn't have an active yet RR, requeing CR reconcile")
+			return reconcile.Result{Requeue: true}, nil
+		}
+
+		var nonRRcpods []*corev1.Pod
+		if nonRRcpods, err = p.getNonRRCalicoPods(nodes); err != nil {
+			return reconcile.Result{}, err
+		}
+
+		// To avoid a network disruption of ~2s on the whole overlay network,
 		// the op. disables all of the BIRD Mesh_ sessions to the RRs
 
 		// i.e. kubectl exec birdcl disable Mesh_
-		if _, err := p.disableMeshSessionsToRrs(calicoPods, rrNodes); err != nil {
+		if _, err := p.disableMeshSessionsToRrs(nonRRcpods, nodesToRRs); err != nil {
+			log.Error(err, "Failed to disable Mesh_ sessions to RRs")
 			return reconcile.Result{}, err
 		}
 
 		// Wait for sessions to reestablish
-		time.Sleep(6 * time.Second)
+		time.Sleep(10 * time.Second)
 
-		if success, err := p.verifyMeshSessionsDisabled(calicoPods, rrNodes); err != nil {
+		if success, err := p.verifyMeshSessionsDisabled(nonRRcpods, nodesToRRs); err != nil {
 			log.Error(err, "Failed to verify RR sessions")
 			return reconcile.Result{}, err
 		} else if !success {
@@ -259,6 +308,97 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 	} // End of disable full-mesh workflow
 
 	return reconcile.Result{}, nil
+}
+
+// GetRRsofNode returns Node object pointers of the RRs of a Node
+// BGPPeers are used to resolve the node<>rr mapping
+// Return is nil if node doesn't have active RRs
+func GetRRsofNode(nodes map[*corev1.Node]bool, existingPeers *apiv3.BGPPeerList, node *corev1.Node) (rrs map[*corev1.Node]bool) {
+	rrIDs := map[string]bool{}
+
+	for _, bp := range existingPeers.Items {
+
+		// Skip rrs-to-rrs which has "has()" NodeSlector
+		if strings.Contains(bp.Name, "rrs-to-rrs") {
+			log.Info("Skipping %s", bp.Name)
+			continue
+		}
+
+		// Get rr-id from PeerSelector in BGPeers where the NodeSelector matches the node
+		if keyFieldOfSelector(bp.Spec.NodeSelector) == node.Name {
+			peerSelector := keyFieldOfSelector(bp.Spec.PeerSelector)
+			log.Info("Found rr-id:%s in BGPPeers:%s as existing RR of Node:%s", peerSelector, bp.Name, node.Name)
+			rrIDs[peerSelector] = true
+		}
+	}
+
+	// Find RR Node pointers by checking their rr-id in the rrIDs map
+	for n := range nodes {
+		if _, ok := rrIDs[n.GetLabels()[routeReflectorLabel]]; ok {
+			log.Info("Found %s as existing RR of Node:%s", n.Name, node.Name)
+			if rrs == nil {
+				rrs = map[*corev1.Node]bool{}
+			}
+			rrs[n] = true
+		}
+	}
+
+	return
+}
+
+func keyFieldOfSelector(s string) (key string) {
+	return strings.ReplaceAll(strings.Split(s, "==")[1], "'", "")
+}
+
+func (p *reconcileImplParams) createNodeNameToRRsMapping(nodes map[*corev1.Node]bool) (map[string]map[*corev1.Node]bool, error) {
+	var err error
+
+	// Fetch existing BGPPeers for GetRRsofNode()
+	var existingBGPPeers *apiv3.BGPPeerList
+	if existingBGPPeers, err = p.bgppeer.ListBGPPeers(); err != nil {
+		log.Error(err, "Failed to fetch existing BGPPeers")
+		return nil, err
+	}
+	log.Info("migration", "Number of BGPPeers at migration: %s", len(existingBGPPeers.Items))
+
+	// Finally, getting the Node Name -> RR pointers mapping using GetRRsofNode
+	// Used for constructing birdcl commands
+	rrNodes := map[string]map[*corev1.Node]bool{}
+	for n := range nodes {
+		if rrs := GetRRsofNode(nodes, existingBGPPeers, n); rrs != nil {
+			rrNodes[n.Name] = rrs
+		}
+	}
+
+	return rrNodes, nil
+}
+
+func (p *reconcileImplParams) getNonRRCalicoPods(nodes map[*corev1.Node]bool) ([]*corev1.Pod, error) {
+	// 1st: Fetch all calico Pods
+	calicoPods := &corev1.PodList{}
+	label, _ := labels.Parse("k8s-app=calico-node")
+	err := p.client.List(context.TODO(), calicoPods, &client.ListOptions{
+		LabelSelector: label,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 2nd: Filter out RR pods to get non-RR pods
+	nonRRcpods := []*corev1.Pod{}
+	for n := range nodes {
+		if p.topology.IsRouteReflector("", n.GetLabels()) {
+			continue
+		}
+		// Get calico pod of the non-RR node
+		for j := range calicoPods.Items {
+			if calicoPods.Items[j].Spec.NodeName == n.Name {
+				nonRRcpods = append(nonRRcpods, &calicoPods.Items[j])
+			}
+		}
+	}
+
+	return nonRRcpods, nil
 }
 
 func (p *reconcileImplParams) isAutoScalerConverged(routereflector *routereflectorv1.RouteReflector) (bool, error) {
@@ -278,32 +418,34 @@ func (p *reconcileImplParams) isFullMeshEnabled() (bool, error) {
 	// Check if NodeToNodeMesh is enabled, if so it's not an RR enabled cluster
 	if bgpconfig != nil && bgpconfig.Spec.NodeToNodeMeshEnabled == &enable {
 		return true, nil
-		// Empty default BGPConfiguration means NodeToNodeMesh is not disable,
-		// migration workflow hasn't been executed yet
 	} else if bgpconfig == nil {
+		// Empty default BGPConfiguration means NodeToNodeMesh is enabled,
+		// migration workflow hasn't been executed yet
 		return true, nil
 	}
 	return false, nil
 }
 
-func (p *reconcileImplParams) disableMeshSessionsToRrs(pods *corev1.PodList, rrNodes *corev1.NodeList) (bool, error) {
+func (p *reconcileImplParams) disableMeshSessionsToRrs(pods []*corev1.Pod, rrNodes map[string]map[*corev1.Node]bool) (bool, error) {
+	log.Info(fmt.Sprintf("Disabling Mesh_ sessions in %v non-RR Pods", len(pods)))
 
-	var cmds [][]string
+	for _, pod := range pods {
+		var cmds [][]string
+		log.Info(fmt.Sprintf("Disabling Mesh_ session in Pod:%s", pod.Spec.NodeName))
+		for rrNode := range rrNodes[pod.Spec.NodeName] {
+			cmds = append(cmds, []string{
+				"birdcl",
+				"-s",
+				"/var/run/calico/bird.ctl",
+				"disable",
+				birdMeshSessionName(rrNode),
+			})
+			log.Info("migration", "Adding ", birdMeshSessionName(rrNode), "to disable session list of Node:", pod.Spec.NodeName)
+		}
 
-	for _, rrNode := range rrNodes.Items {
-		cmds = append(cmds, []string{
-			"birdcl",
-			"-s",
-			"/var/run/calico/bird.ctl",
-			"disable",
-			birdMeshSessionName(&rrNode),
-		})
-	}
-
-	log.Info(fmt.Sprintf("Disabling %v Mesh_ sessions on %v Nodes", len(rrNodes.Items), len(pods.Items)))
-	for _, pod := range pods.Items {
 		for _, cmd := range cmds {
-			p.execOnPod(&pod, cmd)
+			log.Info("Execing", "pod", pod, "cmd", cmd)
+			p.execOnPod(pod, cmd)
 		} // cmd
 	} // pod
 
@@ -312,7 +454,7 @@ func (p *reconcileImplParams) disableMeshSessionsToRrs(pods *corev1.PodList, rrN
 
 // Verifies if Mesh_ sessions to the RRs are in a non Established state
 // and Node_ sessions in the Established state
-func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, rrNodes *corev1.NodeList) (bool, error) {
+func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods []*corev1.Pod, rrNodes map[string]map[*corev1.Node]bool) (bool, error) {
 
 	// To check whether the session is Established. 1 for yes, 0 for no
 	cmd := []string{
@@ -328,24 +470,27 @@ func (p *reconcileImplParams) verifyMeshSessionsDisabled(pods *corev1.PodList, r
 	var birdOutput string
 	var err error
 
-	log.Info(fmt.Sprintf("Verifying %v-%v Mesh_ and Node_ sessions on %v Nodes", len(rrNodes.Items), len(rrNodes.Items), len(pods.Items)))
-	for _, pod := range pods.Items {
-		for _, rrNode := range rrNodes.Items {
+	// log.Info(fmt.Sprintf("Verifying %v-%v Mesh_ and Node_ sessions on %v Nodes", len(rrNodes), len(rrNodes.Items), len(pods.Items)))
+	for _, pod := range pods {
+		for rrNode := range rrNodes[pod.Spec.NodeName] {
 			if pod.Spec.NodeName != rrNode.GetName() {
+				log.Info(fmt.Sprintf("Verifying Mesh_ and Node_ sessions of RR:%s in Pod:%s on Node:%s", rrNode.Name, pod.Name, pod.Spec.NodeName))
 
 				// Checking the Mesh_ session to not be Established
-				cmd[5] = birdMeshSessionName(&rrNode)
-				if birdOutput, err = p.execOnPod(&pod, cmd); err != nil {
+				cmd[5] = birdMeshSessionName(rrNode)
+				log.Info("Execing", "pod", pod, "cmd", cmd)
+				if birdOutput, err = p.execOnPod(pod, cmd); err != nil {
 					log.Error(err, fmt.Sprintf("Exec of %s on %s/%s failed", cmd, pod.Spec.NodeName, pod.GetName()))
 					return false, err
 				} else if strings.Count(birdOutput, "Established") != 0 {
-					log.Info(fmt.Sprintf("VERIFY of [Node_][%s] ERROR on %s", rrNode.GetName(), pod.Spec.NodeName))
+					log.Info(fmt.Sprintf("VERIFY of [Mesh_][%s] ERROR on %s", rrNode.GetName(), pod.Spec.NodeName))
 					return false, nil
 				}
 
 				// Checking the Node_ session to be Established
-				cmd[5] = birdNodeSessionName(&rrNode)
-				if birdOutput, err = p.execOnPod(&pod, cmd); err != nil {
+				cmd[5] = birdNodeSessionName(rrNode)
+				log.Info("Execing", "pod", pod, "cmd", cmd)
+				if birdOutput, err = p.execOnPod(pod, cmd); err != nil {
 					log.Error(err, fmt.Sprintf("Exec of %s on %s/%s failed", cmd, pod.Spec.NodeName, pod.GetName()))
 					return false, err
 				} else if strings.Count(birdOutput, "Established") != 1 {

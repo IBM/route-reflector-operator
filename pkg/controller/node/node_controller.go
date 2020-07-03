@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	routereflectorv1 "github.com/IBM/route-reflector-operator/pkg/apis/routereflector/v1"
@@ -177,9 +178,12 @@ func (r *ReconcileNode) Reconcile(request reconcile.Request) (reconcile.Result, 
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
+			log.Error(err, fmt.Sprintf("Custom Resource: %s/%s not found, can't update AutoScalerConverged state", routeReflectorConfigNameSpace, routeReflectorConfigName))
+			// FIXME: handle missing Custom Resource (e.g. create it?)
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
+		log.Error(err, fmt.Sprintf("Failed to read Custom Resource: %s/%s, can't update AutoScalerConverged state", routeReflectorConfigNameSpace, routeReflectorConfigName))
 		return reconcile.Result{}, err
 	}
 
