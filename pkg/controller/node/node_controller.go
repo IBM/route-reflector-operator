@@ -32,7 +32,6 @@ var log = logf.Log.WithName("controller_node")
 const (
 	routeReflectorLabel           = "route-reflector.ibm.com/rr-id"
 	zoneLabel                     = "failure-domain.beta.kubernetes.io/zone"
-	workerIDLabel                 = "ibm-cloud.kubernetes.io/worker-id"
 	routeReflectorConfigNameSpace = "kube-system"
 	routeReflectorConfigName      = "route-reflector-operator"
 )
@@ -187,7 +186,7 @@ func (r *ReconcileNode) Reconcile(request reconcile.Request) (reconcile.Result, 
 		return reconcile.Result{}, err
 	}
 
-	if routereflector.Status.AutoScalerConverged != true {
+	if !routereflector.Status.AutoScalerConverged {
 
 		log.Info("Setting AutoScalerConverged state to true")
 
