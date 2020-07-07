@@ -38,7 +38,6 @@ var log = logf.Log.WithName("controller_routereflector")
 const (
 	routeReflectorLabel           = "route-reflector.ibm.com/rr-id"
 	zoneLabel                     = "failure-domain.beta.kubernetes.io/zone"
-	workerIDLabel                 = "ibm-cloud.kubernetes.io/worker-id"
 	routeReflectorConfigNameSpace = "kube-system"
 	routeReflectorConfigName      = "route-reflector-operator"
 )
@@ -303,7 +302,10 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		}
 
 		// The full-mesh can be safely teared down now.
-		p.disableFullMesh()
+		_, dErr := p.disableFullMesh()
+		if dErr != nil {
+			log.Error(dErr, "Failed to disable full mesh")
+		}
 
 	} // End of disable full-mesh workflow
 
@@ -445,7 +447,11 @@ func (p *reconcileImplParams) disableMeshSessionsToRrs(pods []*corev1.Pod, rrNod
 
 		for _, cmd := range cmds {
 			log.Info("Execing", "pod", pod, "cmd", cmd)
-			p.execOnPod(pod, cmd)
+			_, pErr := p.execOnPod(pod, cmd)
+			if pErr != nil {
+				log.Error(pErr, "Failed to exec to pod")
+				return false, pErr
+			}
 		} // cmd
 	} // pod
 

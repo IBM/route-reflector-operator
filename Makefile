@@ -1,4 +1,25 @@
 GO111MODULE := on
+GOLANGCI_LINT_EXISTS:=$(shell golangci-lint --version 2>/dev/null)
+
+.PHONY: lint
+lint:
+ifdef GOLANGCI_LINT_EXISTS
+	golangci-lint run
+else
+	@echo "golangci-lint is not installed"
+endif
+
+.PHONY: lint-fmt
+lint-fmt:
+	@if [ -n "$$(gofmt -l ${GOFILES})" ]; then echo 'Please run `make fmt` on your code.' && exit 1; fi
+
+.PHONY: fmt
+fmt:
+ifdef GOLANGCI_LINT_EXISTS
+	golangci-lint run --disable-all --enable=gofmt --fix
+else
+	@echo "golangci-lint is not installed"
+endif
 
 update-operator-resource:
 	operator-sdk generate crds
