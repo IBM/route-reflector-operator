@@ -17,7 +17,7 @@ require (
 	github.com/json-iterator/go v1.1.9 // indirect
 	github.com/konsorten/go-windows-terminal-sequences v1.0.3 // indirect
 	github.com/mailru/easyjson v0.7.1 // indirect
-	github.com/mhmxs/calico-route-reflector-operator v0.0.5
+	github.com/mhmxs/calico-route-reflector-operator v0.1.0
 	github.com/operator-framework/operator-sdk v0.16.0
 	github.com/projectcalico/libcalico-go v1.7.2-0.20200427180741-f197f7370140
 	github.com/prometheus/procfs v0.0.11 // indirect
