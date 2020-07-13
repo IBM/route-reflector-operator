@@ -46,13 +46,14 @@ apply-role:
 	-kubectl apply -f deploy/crds/route-reflector.ibm.com_v1_routereflector_cr.yaml
 
 copy-secret:
-	-kubectl get secret default-us-icr-io -n default -o yaml | sed -e 's/namespace: default/namespace: kube-system/' -e 's/default-us-icr-io/default-us-icr-io/' | kubectl create -f -
+	$(eval export SECRETNAME=$(shell sh -c "if kubectl get secret default-us-icr-io &>/dev/null; then echo 'default-us-icr-io'; else echo 'all-icr-io'; fi"))
+	-kubectl get secret $(SECRETNAME) -n default -o yaml | sed -e 's/namespace: default/namespace: kube-system/' -e 's/$(SECRETNAME)/default-us-icr-io/' | kubectl create -f - &>/dev/null
 
 logsf:
 	kubectl -nkube-system logs -f $$(kubectl -nkube-system -lname=route-reflector-operator get pods -o=name)
 
 slogsf:
-	sleep 5
+	sleep 15
 	kubectl -nkube-system logs -f $$(kubectl -nkube-system -lname=route-reflector-operator get pods -o=name)
 
 watch:
