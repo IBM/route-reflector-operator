@@ -236,6 +236,9 @@ create_kind_cluster() {
     cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --config=-
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  podSubnet: 192.168.0.0/16
 nodes:
 - role: control-plane
 - role: worker
@@ -244,17 +247,20 @@ EOF
   else
     fvtlog "Warning! Running on existing cluster!"
   fi
+
+  fvtlog "Deploying Calico"
+  kubectl apply -f https://docs.projectcalico.org/v3.12/manifests/calico.yaml
 }
 
 manage_common_operator_resources() {
   local action=$1
-  fvtlog "${action^} common static-route-operator related resources..."
-  declare -a common_resources=('crds/static-route.ibm.com_staticroutes_crd.yaml' 'service_account.yaml' 'role.yaml' 'role_binding.yaml');
+  fvtlog "${action} common route-reflector-operator related resources..."
+  declare -a common_resources=('crds/route-reflector.ibm.com_routereflectors_crd.yaml' 'crds/route-reflector.ibm.com_v1_routereflector_cr.yaml' 'service_account.yaml' 'role.yaml' 'role_binding.yaml');
   for resource in "${common_resources[@]}"; do
     kubectl "${action}" -f "${SCRIPT_PATH}"/../deploy/"${resource}"
   done
 
-  fvtlog "${action^} the static-route-operator..."
+  fvtlog "${action} the route-reflector-operator..."
   cp "${SCRIPT_PATH}"/../deploy/operator.yaml "${SCRIPT_PATH}"/../deploy/operator.dev.yaml
   sed -i "s|REPLACE_IMAGE|${REGISTRY_REPO}:${CONTAINER_VERSION}|g" "${SCRIPT_PATH}"/../deploy/operator.dev.yaml
   sed -i "s|Always|IfNotPresent|g" "${SCRIPT_PATH}"/../deploy/operator.dev.yaml

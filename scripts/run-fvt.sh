@@ -3,7 +3,7 @@ set -e
 set -o pipefail
 
 SCRIPT_PATH=$PWD/$(dirname "$0")
-KIND_CLUSTER_NAME="static-route-operator-fvt"
+KIND_CLUSTER_NAME="route-reflector-operator-fvt"
 KEEP_ENV="${KEEP_ENV:-false}"
 SKIP_OPERATOR_INSTALL="${SKIP_OPERATOR_INSTALL:-false}"
 PROVIDER="${PROVIDER:-kind}"
