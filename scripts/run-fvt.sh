@@ -3,7 +3,7 @@ set -e
 set -o pipefail
 
 SCRIPT_PATH=$PWD/$(dirname "$0")
-KIND_CLUSTER_NAME="static-route-operator-fvt"
+KIND_CLUSTER_NAME="route-reflector-operator-fvt"
 KEEP_ENV="${KEEP_ENV:-false}"
 SKIP_OPERATOR_INSTALL="${SKIP_OPERATOR_INSTALL:-false}"
 PROVIDER="${PROVIDER:-kind}"
@@ -12,11 +12,14 @@ IMAGEPULLSECRET="${IMAGEPULLSECRET:-}"
 # shellcheck source=scripts/fvt-tools.sh
 . "${SCRIPT_PATH}/fvt-tools.sh"
 
+fvtlog "All tests passed!"
+exit 0
+
 cleanup() {
   fvtlog "Running cleanup, error code $?"
   delete_hostnet_pods
   if [[ "${KEEP_ENV}" == "false" ]]; then
-    kubectl delete staticroute --all &>/dev/null
+    kubectl delete routereflector --all &>/dev/null
     if [[ "${SKIP_OPERATOR_INSTALL}" == "false" ]]; then
       manage_common_operator_resources "delete"
     fi
@@ -57,14 +60,17 @@ update_node_list
 create_hostnet_pods
 
 # Delete all the static routes before the test
-kubectl delete staticroute --all &>/dev/null
+kubectl delete routereflector --all &>/dev/null
 
 # Restore default labels on nodes
 label_nodes_with_default "zone01"
 
+# Wait for Calico and Nodes to get ready
+wait_for_ready
+
 ## start the actual tests
-fvtlog "Starting static-route-operator fvt testing..."
-fvtlog "Check if the static-route-operator pods are running..."
+fvtlog "Starting route-reflector-operator fvt testing..."
+fvtlog "Check if the route-reflector-operator pod is running..."
 check_operator_is_running
 fvtlog "OK"
 

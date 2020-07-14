@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Wait loop configuration
-SLEEP_COUNT=10
+SLEEP_COUNT=20
 SLEEP_WAIT_SECONDS=6
 declare -a NODES
 
@@ -11,6 +11,29 @@ fvtlog() {
 
 update_node_list() {
   mapfile -d' ' -t NODES < <(kubectl get nodes --no-headers -o jsonpath='{.items[*].metadata.name}')
+}
+
+wait_for_ready() {
+  for _ in $(seq ${SLEEP_COUNT}); do
+    actual=$(kubectl -nkube-system get pods --selector=k8s-app=calico-node --field-selector=status.phase=Running --no-headers | wc -l)
+    expected=$(kubectl -nkube-system get pods --selector=k8s-app=calico-node --no-headers | wc -l)
+    fvtlog "Waiting for calico-node pods to come up. Actual: ${actual}, expected: ${expected}"
+    if [[ "${actual}" -eq "${expected}" ]]; then
+      status_ok=true
+      break
+    fi
+    sleep ${SLEEP_WAIT_SECONDS}
+  done
+
+  for _ in $(seq ${SLEEP_COUNT}); do
+    actual=$(kubectl get nodes --no-headers | grep -c ' Ready')
+    expected=$(kubectl get nodes --no-headers | wc -l)
+    fvtlog "Waiting for nodes to come up. Actual: ${actual}, expected: ${expected}"
+    if [[ "${actual}" -eq "${expected}" ]]; then
+      status_ok=true
+      break
+    fi
+  done
 }
 
 pick_non_master_node() {
@@ -157,7 +180,7 @@ check_operator_is_running() {
   set +e
   local reached_expected_count=false
   for _ in $(seq ${SLEEP_COUNT}); do
-    number_of_pods_not_running=$(kubectl get pods -A --selector name=static-route-operator --no-headers | grep -vc Running)
+    number_of_pods_not_running=$(kubectl get pods -A --selector name=route-reflector-operator --no-headers | grep -vc Running)
     if [[ $number_of_pods_not_running -eq 0 ]]; then
       reached_expected_count=true
       break
@@ -167,7 +190,7 @@ check_operator_is_running() {
   done
   set -e
   if [[ $reached_expected_count == false ]]; then
-    fvtlog "Failed to get running status for the static-route-operator pods. Could it pull its image?"
+    fvtlog "Failed to get running status for the route-reflector-operator pod. Could it pull its image?"
     return 2
   fi
 }
@@ -236,6 +259,9 @@ create_kind_cluster() {
     cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --config=-
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  podSubnet: 192.168.0.0/16
 nodes:
 - role: control-plane
 - role: worker
@@ -244,17 +270,20 @@ EOF
   else
     fvtlog "Warning! Running on existing cluster!"
   fi
+
+  fvtlog "Deploying Calico"
+  kubectl apply -f https://docs.projectcalico.org/v3.12/manifests/calico.yaml
 }
 
 manage_common_operator_resources() {
   local action=$1
-  fvtlog "${action^} common static-route-operator related resources..."
-  declare -a common_resources=('crds/static-route.ibm.com_staticroutes_crd.yaml' 'service_account.yaml' 'role.yaml' 'role_binding.yaml');
+  fvtlog "${action} common route-reflector-operator related resources..."
+  declare -a common_resources=('crds/route-reflector.ibm.com_routereflectors_crd.yaml' 'crds/route-reflector.ibm.com_v1_routereflector_cr.yaml' 'service_account.yaml' 'role.yaml' 'role_binding.yaml');
   for resource in "${common_resources[@]}"; do
     kubectl "${action}" -f "${SCRIPT_PATH}"/../deploy/"${resource}"
   done
 
-  fvtlog "${action^} the static-route-operator..."
+  fvtlog "${action} the route-reflector-operator..."
   cp "${SCRIPT_PATH}"/../deploy/operator.yaml "${SCRIPT_PATH}"/../deploy/operator.dev.yaml
   sed -i "s|REPLACE_IMAGE|${REGISTRY_REPO}:${CONTAINER_VERSION}|g" "${SCRIPT_PATH}"/../deploy/operator.dev.yaml
   sed -i "s|Always|IfNotPresent|g" "${SCRIPT_PATH}"/../deploy/operator.dev.yaml
