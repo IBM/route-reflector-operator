@@ -30,5 +30,5 @@ There is a prerequisite for running `make fmt` that you have `golangci-lint` ins
 
 Please install the latest version by running:
 ```bash
-curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | sh -s -- -b $(go env GOPATH)/bin v1.28.1
+curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | sh -s -- -b $(go env GOPATH)/bin v1.30.0
 ```
