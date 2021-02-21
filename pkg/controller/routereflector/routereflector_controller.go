@@ -238,7 +238,7 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		log.Info("route-reflector-operator", "Starting migration to RRs workflow", "")
 		log.Info("route-reflector-operator", "====================================================================", "")
 
-		// Fetch NodeList for GetRRsofNode() and createNodeNameToRRsMapping() maps
+		// Fetch NodeList for createNodeNameToPeersMapping()
 		nodeList := &corev1.NodeList{}
 		if err = p.client.List(context.Background(), nodeList, &client.ListOptions{}); err != nil {
 			log.Error(err, "Failed to fetch NodeList")
@@ -247,45 +247,40 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		// FIXME: use . to generate nodes
 		// func (r *RouteReflectorConfigReconciler) collectNodeInfo(allNodes []corev1.Node) (readyNodes int, actualReadyNumber int, filtered map[*corev1.Node]bool)
 		//
-		// Create map for GetRRsofNode() and createNodeNameToRRsMapping()
+		// Create map for createNodeNameToPeersMapping()
 		nodes := map[*corev1.Node]bool{}
 		for i := range nodeList.Items {
 			nodes[&nodeList.Items[i]] = true
 		}
 
-		// Generate NodeName to RR pointers mappings (nodesToRRs, a map of maps)
-		var nodesToRRs map[string]map[*corev1.Node]bool
-		if nodesToRRs, err = p.createNodeNameToRRsMapping(nodes); err != nil {
+		var peersOfNode map[string]map[*corev1.Node]bool
+		if peersOfNode, err = p.createNodeNameToPeersMapping(nodes); err != nil {
 			return reconcile.Result{}, err
 		}
 
-		// Fetch RR nodes for extra verifiction,
-		// to check if all non-rr nodes have at least 1 RR session
-		rrs := &corev1.NodeList{}
-		label, _ := labels.Parse(routeReflectorLabel)
-		if err = p.client.List(context.Background(), rrs, &client.ListOptions{
-			LabelSelector: label,
-		}); err != nil {
-			log.Error(err, "Failed to fetch RR NodeList")
-			return reconcile.Result{}, err
-		}
+		// log.Info(fmt.Sprintf("len(rrNodes)=%v len(nodes)=%v len(rrs.Items)=%v", len(nodesToRRs), len(nodes), len(rrs.Items)))
+		// if len(nodesToRRs) < (len(nodes) - len(rrs.Items)) {
+		// 	log.Error(err, "Some non-rr Nodes doesn't have an active yet RR, requeing CR reconcile")
+		// 	return reconcile.Result{Requeue: true}, nil
+		// }
 
-		log.Info(fmt.Sprintf("len(rrNodes)=%v len(nodes)=%v len(rrs.Items)=%v", len(nodesToRRs), len(nodes), len(rrs.Items)))
-		if len(nodesToRRs) < (len(nodes) - len(rrs.Items)) {
-			log.Error(err, "Some non-rr Nodes doesn't have an active yet RR, requeing CR reconcile")
-			return reconcile.Result{Requeue: true}, nil
-		}
-
-		var nonRRcpods []*corev1.Pod
-		if nonRRcpods, err = p.getNonRRCalicoPods(nodes); err != nil {
+		var rrcpods, nonRRcpods []*corev1.Pod
+		if rrcpods, nonRRcpods, err = p.getCalicoPods(nodes); err != nil {
 			return reconcile.Result{}, err
 		}
 
 		// To avoid a network disruption of ~2s on the whole overlay network,
-		// the op. disables all of the BIRD Mesh_ sessions to the RRs
-
+		// the op. disables the BIRD Mesh_ sessions to the Clients of an RR
+		// and then all of the sessions to the RRs of a Client
 		// i.e. kubectl exec birdcl disable Mesh_
-		if _, err := p.disableMeshSessionsToRrs(nonRRcpods, nodesToRRs); err != nil {
+
+		// FIXME run disable of Client sessions on IKS 1.18 / Calico 3.13 and above only
+		if _, err := p.disableMeshSessions(rrcpods, peersOfNode); err != nil {
+			log.Error(err, "Failed to disable Mesh_ sessions to Clients")
+			return reconcile.Result{}, err
+		}
+
+		if _, err := p.disableMeshSessions(nonRRcpods, peersOfNode); err != nil {
 			log.Error(err, "Failed to disable Mesh_ sessions to RRs")
 			return reconcile.Result{}, err
 		}
@@ -293,7 +288,7 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 		// Wait for sessions to reestablish
 		time.Sleep(10 * time.Second)
 
-		if success, err := p.verifyMeshSessionsDisabled(nonRRcpods, nodesToRRs); err != nil {
+		if success, err := p.verifyMeshSessionsDisabled(nonRRcpods, peersOfNode); err != nil {
 			log.Error(err, "Failed to verify RR sessions")
 			return reconcile.Result{}, err
 		} else if !success {
@@ -312,10 +307,10 @@ func (p *reconcileImplParams) reconcileImpl(request reconcile.Request) (reconcil
 	return reconcile.Result{}, nil
 }
 
-// GetRRsofNode returns Node object pointers of the RRs of a Node
+// getRRsofNode returns Node object pointers of the RRs of a Node
 // BGPPeers are used to resolve the node<>rr mapping
 // Return is nil if node doesn't have active RRs
-func GetRRsofNode(nodes map[*corev1.Node]bool, existingPeers *apiv3.BGPPeerList, node *corev1.Node) (rrs map[*corev1.Node]bool) {
+func getRRsofNode(nodes map[*corev1.Node]bool, existingPeers *apiv3.BGPPeerList, node *corev1.Node) (rrs map[*corev1.Node]bool) {
 	rrIDs := map[string]bool{}
 
 	for _, bp := range existingPeers.Items {
@@ -348,14 +343,47 @@ func GetRRsofNode(nodes map[*corev1.Node]bool, existingPeers *apiv3.BGPPeerList,
 	return
 }
 
+func getClientsofRR(nodes map[*corev1.Node]bool, existingPeers *apiv3.BGPPeerList, node *corev1.Node) (clients map[*corev1.Node]bool) {
+	clientNames := map[string]bool{}
+
+	for _, bp := range existingPeers.Items {
+
+		// Skip rrs-to-rrs which has "has()" NodeSlector
+		if strings.Contains(bp.Name, "rrs-to-rrs") {
+			log.Info("Skipping %s", bp.Name)
+			continue
+		}
+
+		// Get clients NodeName from NodeSelector in BGPeers where the PeerSelector matches the RR's rr-id
+		if keyFieldOfSelector(bp.Spec.PeerSelector) == node.GetLabels()[routeReflectorLabel] {
+			nodeSelector := keyFieldOfSelector(bp.Spec.NodeSelector)
+			log.Info("Found node:%s in BGPPeers:%s as existing Client of Node:%s", nodeSelector, bp.Name, node.Name)
+			clientNames[nodeSelector] = true
+		}
+	}
+
+	// Find Client Node pointers by their Name
+	for n := range nodes {
+		if _, ok := clientNames[n.GetName()]; ok {
+			log.Info("Found %s as existing Client of Node:%s", n.Name, node.Name)
+			if clients == nil {
+				clients = map[*corev1.Node]bool{}
+			}
+			clients[n] = true
+		}
+	}
+
+	return
+}
+
 func keyFieldOfSelector(s string) (key string) {
 	return strings.ReplaceAll(strings.Split(s, "==")[1], "'", "")
 }
 
-func (p *reconcileImplParams) createNodeNameToRRsMapping(nodes map[*corev1.Node]bool) (map[string]map[*corev1.Node]bool, error) {
+func (p *reconcileImplParams) createNodeNameToPeersMapping(nodes map[*corev1.Node]bool) (map[string]map[*corev1.Node]bool, error) {
 	var err error
 
-	// Fetch existing BGPPeers for GetRRsofNode()
+	// Fetch existing BGPPeers for getRRsofNode()
 	var existingBGPPeers *apiv3.BGPPeerList
 	if existingBGPPeers, err = p.bgppeer.ListBGPPeers(); err != nil {
 		log.Error(err, "Failed to fetch existing BGPPeers")
@@ -363,19 +391,26 @@ func (p *reconcileImplParams) createNodeNameToRRsMapping(nodes map[*corev1.Node]
 	}
 	log.Info("migration", "Number of BGPPeers at migration: %s", len(existingBGPPeers.Items))
 
-	// Finally, getting the Node Name -> RR pointers mapping using GetRRsofNode
+	// Finally, getting the Node Name -> Client|RR pointers mapping using getClientsofRR and getRRsofNode
 	// Used for constructing birdcl commands
-	rrNodes := map[string]map[*corev1.Node]bool{}
+
+	peersOfNode := map[string]map[*corev1.Node]bool{}
+
 	for n := range nodes {
-		if rrs := GetRRsofNode(nodes, existingBGPPeers, n); rrs != nil {
-			rrNodes[n.Name] = rrs
+		if rrs := getRRsofNode(nodes, existingBGPPeers, n); rrs != nil {
+			peersOfNode[n.Name] = rrs
+		}
+	}
+	for n := range nodes {
+		if clients := getClientsofRR(nodes, existingBGPPeers, n); clients != nil {
+			peersOfNode[n.Name] = clients
 		}
 	}
 
-	return rrNodes, nil
+	return peersOfNode, nil
 }
 
-func (p *reconcileImplParams) getNonRRCalicoPods(nodes map[*corev1.Node]bool) ([]*corev1.Pod, error) {
+func (p *reconcileImplParams) getCalicoPods(nodes map[*corev1.Node]bool) ([]*corev1.Pod, []*corev1.Pod, error) {
 	// 1st: Fetch all calico Pods
 	calicoPods := &corev1.PodList{}
 	label, _ := labels.Parse("k8s-app=calico-node")
@@ -383,24 +418,25 @@ func (p *reconcileImplParams) getNonRRCalicoPods(nodes map[*corev1.Node]bool) ([
 		LabelSelector: label,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// 2nd: Filter out RR pods to get non-RR pods
+	// 2nd: Assort them to RR and non-RR Pods
+	rrcpods := []*corev1.Pod{}
 	nonRRcpods := []*corev1.Pod{}
 	for n := range nodes {
-		if p.topology.IsRouteReflector("", n.GetLabels()) {
-			continue
-		}
-		// Get calico pod of the non-RR node
 		for j := range calicoPods.Items {
 			if calicoPods.Items[j].Spec.NodeName == n.Name {
-				nonRRcpods = append(nonRRcpods, &calicoPods.Items[j])
+				if p.topology.IsRouteReflector("", n.GetLabels()) {
+					rrcpods = append(rrcpods, &calicoPods.Items[j])
+				} else {
+					nonRRcpods = append(nonRRcpods, &calicoPods.Items[j])
+				}
 			}
 		}
 	}
 
-	return nonRRcpods, nil
+	return rrcpods, nonRRcpods, nil
 }
 
 func (p *reconcileImplParams) isAutoScalerConverged(routereflector *routereflectorv1.RouteReflector) (bool, error) {
@@ -428,7 +464,7 @@ func (p *reconcileImplParams) isFullMeshEnabled() (bool, error) {
 	return false, nil
 }
 
-func (p *reconcileImplParams) disableMeshSessionsToRrs(pods []*corev1.Pod, rrNodes map[string]map[*corev1.Node]bool) (bool, error) {
+func (p *reconcileImplParams) disableMeshSessions(pods []*corev1.Pod, rrNodes map[string]map[*corev1.Node]bool) (bool, error) {
 	log.Info(fmt.Sprintf("Disabling Mesh_ sessions in %v non-RR Pods", len(pods)))
 
 	for _, pod := range pods {
